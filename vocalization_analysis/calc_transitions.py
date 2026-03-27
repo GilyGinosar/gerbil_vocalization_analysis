@@ -378,8 +378,8 @@ def plot_transition_matrices(
     if call_type_order is None:
         call_type_order = CALL_TYPE_ORDER
 
-    fig = plt.figure(figsize=(40, 28), constrained_layout=False)
-    gs = fig.add_gridspec(4, 6, height_ratios=[0.2, 1.0, 1.0, 1.0], hspace=0.10, wspace=0.30)
+    fig = plt.figure(figsize=(52, 28), constrained_layout=False)
+    gs = fig.add_gridspec(4, 9, height_ratios=[0.2, 1.0, 1.0, 1.0], hspace=0.10, wspace=0.24)
     fig.subplots_adjust(top=0.93)
 
     # Top row: manual placement so it keeps prior sizing and does not follow matrix columns.
@@ -397,9 +397,9 @@ def plot_transition_matrices(
         fig.add_axes([0.80, 0.856, 0.055, 0.094]),
         fig.add_axes([0.865, 0.856, 0.055, 0.094]),
     ]
-    count_axes = [fig.add_subplot(gs[1, c]) for c in range(6)]
-    prob_axes = [fig.add_subplot(gs[2, c]) for c in range(6)]
-    prob_global_axes = [fig.add_subplot(gs[3, c]) for c in range(6)]
+    count_axes = [fig.add_subplot(gs[1, c]) for c in range(9)]
+    prob_axes = [fig.add_subplot(gs[2, c]) for c in range(9)]
+    prob_global_axes = [fig.add_subplot(gs[3, c]) for c in range(9)]
 
     if row_y_shift is None:
         row_y_shift = {0: -0.08, 1: -0.13, 2: -0.1, 3: -0.08}
@@ -410,15 +410,15 @@ def plot_transition_matrices(
                 p = ax.get_position()
                 ax.set_position([p.x0, p.y0 + dy, p.width, p.height])
 
-    # Bring each Underground panel a bit closer to its paired Arena panel.
-    pair_dx = -0.02
-    for ax in (
-        count_axes[1], count_axes[3], count_axes[5],
-        prob_axes[1], prob_axes[3], prob_axes[5],
-        prob_global_axes[1], prob_global_axes[3], prob_global_axes[5]
-    ):
-        p = ax.get_position()
-        ax.set_position([p.x0 + pair_dx, p.y0, p.width, p.height])
+    # Decrease horizontal gaps within each triplet (Arena, Underground, Diff).
+    triplet_dx_2nd = -0.01
+    triplet_dx_3rd = -0.02
+    for row_axes in (count_axes, prob_axes, prob_global_axes):
+        for base in (0, 3, 6):
+            p2 = row_axes[base + 1].get_position()
+            row_axes[base + 1].set_position([p2.x0 + triplet_dx_2nd, p2.y0, p2.width, p2.height])
+            p3 = row_axes[base + 2].get_position()
+            row_axes[base + 2].set_position([p3.x0 + triplet_dx_3rd, p3.y0, p3.width, p3.height])
 
     call_count_series = {}
     count_left = {}
@@ -535,71 +535,154 @@ def plot_transition_matrices(
     for ax in extra_hist_axes[len(self_ici_call_types[:len(extra_hist_axes)]):]:
         ax.set_axis_off()
 
-    bottom_specs = [
-        (count_axes[0], prob_axes[0], 'arena', count_left, prob_left, interval_left),
-        (count_axes[1], prob_axes[1], 'underground', count_left, prob_left, interval_left),
-        (count_axes[2], prob_axes[2], 'arena', count_mid, prob_mid, interval_mid),
-        (count_axes[3], prob_axes[3], 'underground', count_mid, prob_mid, interval_mid),
-        (count_axes[4], prob_axes[4], 'arena', count_right, prob_right, interval_right),
-        (count_axes[5], prob_axes[5], 'underground', count_right, prob_right, interval_right),
+    interval_specs = [
+        (count_left, prob_left, interval_left),
+        (count_mid, prob_mid, interval_mid),
+        (count_right, prob_right, interval_right),
     ]
 
+    count_main_axes = []
+    count_diff_axes = []
+    prob_main_axes = []
+    prob_diff_axes = []
+    w_main_axes = []
+    w_diff_axes = []
+    count_diff_imgs = []
+    prob_diff_imgs = []
+    w_main_imgs = []
+    w_diff_imgs = []
+    count_diff_max = 0.0
+    prob_diff_max = 0.0
     weighted_prob_max = 0.0
-    weighted_prob_frames = []
-    for col_idx, (count_ax, prob_ax, arena, cdict, pdict, interval_val) in enumerate(bottom_specs):
-        area_title = 'Arena' if arena == 'arena' else 'Underground'
-        subtitle = area_title
-        cdf = cdict[arena]
-        pdf = pdict[arena]
+    weighted_diff_max = 0.0
 
-        count_img = count_ax.imshow(np.log1p(cdf.values), cmap='viridis', vmin=0, vmax=global_log_count_max, aspect='equal')
-        count_ax.set_title(subtitle)
-        count_ax.set_xticks(range(len(cdf.columns)))
-        count_ax.set_xticklabels(cdf.columns, rotation=90)
-        count_ax.set_yticks(range(len(cdf.index)))
-        count_ax.set_yticklabels(cdf.index if col_idx in (0, 2, 4) else [])
+    for g_idx, (cdict, pdict, _interval_val) in enumerate(interval_specs):
+        c_arena = cdict['arena']
+        c_und = cdict['underground']
+        c_diff = c_arena - c_und
+        p_arena = pdict['arena']
+        p_und = pdict['underground']
+        p_diff = p_arena - p_und
 
-        prob_img = prob_ax.imshow(pdf.values, cmap='magma', vmin=0, vmax=1, aspect='equal')
-        prob_ax.set_title(subtitle)
-        prob_ax.set_xticks(range(len(pdf.columns)))
-        prob_ax.set_xticklabels(pdf.columns, rotation=90)
-        prob_ax.set_yticks(range(len(pdf.index)))
-        prob_ax.set_yticklabels(pdf.index if col_idx in (0, 2, 4) else [])
+        def weighted(pdf, arena_key):
+            src_calls = call_count_series[arena_key].reindex(pdf.index, fill_value=0).astype(float)
+            total_calls = float(src_calls.sum())
+            if total_calls > 0:
+                return pdf.mul(src_calls / total_calls, axis=0)
+            return pd.DataFrame(0.0, index=pdf.index, columns=pdf.columns)
 
-        # Prevalence-weighted row probabilities:
-        # weighted(i, j) = P(j | i) * prevalence(i)
-        # where prevalence(i) = n_calls(i) / total_calls.
-        src_calls = call_count_series[arena].reindex(pdf.index, fill_value=0).astype(float)
-        total_calls = float(src_calls.sum())
-        if total_calls > 0:
-            prevalence = src_calls / total_calls
-            pweighted = pdf.mul(prevalence, axis=0)
-        else:
-            pweighted = pd.DataFrame(0.0, index=pdf.index, columns=pdf.columns)
-        weighted_prob_max = max(weighted_prob_max, float(pweighted.values.max()))
-        weighted_prob_frames.append((col_idx, pweighted))
+        w_arena = weighted(p_arena, 'arena')
+        w_und = weighted(p_und, 'underground')
+        w_diff = w_arena - w_und
 
-        pglob_ax = prob_global_axes[col_idx]
-        prob_global_img = pglob_ax.imshow(pweighted.values, cmap='cividis', vmin=0, vmax=1, aspect='equal')
-        pglob_ax.set_title(subtitle)
-        pglob_ax.set_xticks(range(len(pweighted.columns)))
-        pglob_ax.set_xticklabels(pweighted.columns, rotation=90)
-        pglob_ax.set_yticks(range(len(pweighted.index)))
-        pglob_ax.set_yticklabels(pweighted.index if col_idx in (0, 2, 4) else [])
+        count_diff_max = max(count_diff_max, float(np.abs(c_diff.values).max()))
+        prob_diff_max = max(prob_diff_max, float(np.abs(p_diff.values).max()))
+        weighted_prob_max = max(weighted_prob_max, float(w_arena.values.max()), float(w_und.values.max()))
+        weighted_diff_max = max(weighted_diff_max, float(np.abs(w_diff.values).max()))
 
-    count_cbar = fig.colorbar(count_img, ax=count_axes, fraction=0.008, pad=0.008, shrink=0.68)
+        col0 = g_idx * 3
+        panels = [
+            ('Arena', c_arena, p_arena, w_arena),
+            ('Underground', c_und, p_und, w_und),
+            ('Diff (A-U)', c_diff, p_diff, w_diff),
+        ]
+        for local_idx, (subtitle, cdf, pdf, wdf) in enumerate(panels):
+            col_idx = col0 + local_idx
+            cax = count_axes[col_idx]
+            pax = prob_axes[col_idx]
+            wax = prob_global_axes[col_idx]
+
+            cimg = cax.imshow(np.sign(cdf.values) * np.log1p(np.abs(cdf.values)) if local_idx == 2 else np.log1p(cdf.values),
+                              cmap='coolwarm' if local_idx == 2 else 'viridis',
+                              vmin=-1 if local_idx == 2 else 0,
+                              vmax=1 if local_idx == 2 else global_log_count_max,
+                              aspect='equal')
+            cax.set_title(subtitle)
+            cax.set_xticks(range(len(cdf.columns)))
+            cax.set_xticklabels(cdf.columns, rotation=90)
+            cax.set_yticks(range(len(cdf.index)))
+            cax.set_yticklabels(cdf.index if col_idx in (0, 3, 6) else [])
+
+            pimg = pax.imshow(pdf.values, cmap='coolwarm' if local_idx == 2 else 'magma',
+                              vmin=-1 if local_idx == 2 else 0,
+                              vmax=1, aspect='equal')
+            pax.set_title(subtitle)
+            pax.set_xticks(range(len(pdf.columns)))
+            pax.set_xticklabels(pdf.columns, rotation=90)
+            pax.set_yticks(range(len(pdf.index)))
+            pax.set_yticklabels(pdf.index if col_idx in (0, 3, 6) else [])
+
+            wimg = wax.imshow(wdf.values, cmap='coolwarm' if local_idx == 2 else 'cividis',
+                              vmin=-1 if local_idx == 2 else 0,
+                              vmax=1, aspect='equal')
+            wax.set_title(subtitle)
+            wax.set_xticks(range(len(wdf.columns)))
+            wax.set_xticklabels(wdf.columns, rotation=90)
+            wax.set_yticks(range(len(wdf.index)))
+            wax.set_yticklabels(wdf.index if col_idx in (0, 3, 6) else [])
+
+            if local_idx == 2:
+                count_diff_axes.append(cax)
+                prob_diff_axes.append(pax)
+                w_diff_axes.append(wax)
+                count_diff_imgs.append(cimg)
+                prob_diff_imgs.append(pimg)
+                w_diff_imgs.append(wimg)
+            else:
+                count_main_axes.append(cax)
+                prob_main_axes.append(pax)
+                w_main_axes.append(wax)
+                w_main_imgs.append(wimg)
+
+    cdiff_vmax = count_diff_max if count_diff_max > 0 else 1.0
+    pdiff_vmax = prob_diff_max if prob_diff_max > 0 else 1.0
+    wmain_vmax = weighted_prob_max if weighted_prob_max > 0 else 1.0
+    wdiff_vmax = weighted_diff_max if weighted_diff_max > 0 else 1.0
+    for img in count_diff_imgs:
+        img.set_clim(-np.log1p(cdiff_vmax), np.log1p(cdiff_vmax))
+    for img in prob_diff_imgs:
+        img.set_clim(-pdiff_vmax, pdiff_vmax)
+    for img in w_main_imgs:
+        img.set_clim(0, wmain_vmax)
+    for img in w_diff_imgs:
+        img.set_clim(-wdiff_vmax, wdiff_vmax)
+
+    # Place all matrix colorbars in the far-right margin (main + diff per row).
+    def _row_y_bounds(row_axes):
+        return min(ax.get_position().y0 for ax in row_axes), max(ax.get_position().y1 for ax in row_axes)
+
+    c_y0, c_y1 = _row_y_bounds(count_axes)
+    p_y0, p_y1 = _row_y_bounds(prob_axes)
+    w_y0, w_y1 = _row_y_bounds(prob_global_axes)
+    cb_w = 0.007
+    cb_gap = 0.006
+    cb_right = 0.922
+    cb_x_main = cb_right - cb_w
+    cb_x_diff = cb_x_main - cb_gap - cb_w - 0.009
+
+    cax_count_main = fig.add_axes([cb_x_main, c_y0, cb_w, c_y1 - c_y0])
+    cax_count_diff = fig.add_axes([cb_x_diff, c_y0, cb_w, c_y1 - c_y0])
+    cax_prob_main = fig.add_axes([cb_x_main, p_y0, cb_w, p_y1 - p_y0])
+    cax_prob_diff = fig.add_axes([cb_x_diff, p_y0, cb_w, p_y1 - p_y0])
+    cax_w_main = fig.add_axes([cb_x_main, w_y0, cb_w, w_y1 - w_y0])
+    cax_w_diff = fig.add_axes([cb_x_diff, w_y0, cb_w, w_y1 - w_y0])
+
+    count_cbar = fig.colorbar(count_main_axes[0].images[0], cax=cax_count_main)
     ticks = count_cbar.get_ticks()
     count_cbar.set_ticks(ticks)
     count_cbar.set_ticklabels([f'log1p={t:g}, n_calls~{int(np.expm1(t)):,}' for t in ticks])
+    count_diff_cbar = fig.colorbar(count_diff_axes[0].images[0], cax=cax_count_diff)
+    count_diff_cbar.set_label('Diff (Arena - Underground), log-scaled')
 
-    prob_cbar = fig.colorbar(prob_img, ax=prob_axes, fraction=0.008, pad=0.008, shrink=0.68)
+    prob_cbar = fig.colorbar(prob_main_axes[0].images[0], cax=cax_prob_main)
     prob_cbar.set_label('Transition probability')
+    prob_diff_cbar = fig.colorbar(prob_diff_axes[0].images[0], cax=cax_prob_diff)
+    prob_diff_cbar.set_label('Diff (Arena - Underground)')
 
-    vmax_global = weighted_prob_max if weighted_prob_max > 0 else 1.0
-    for col_idx, pweighted in weighted_prob_frames:
-        prob_global_axes[col_idx].images[0].set_clim(0, vmax_global)
-    prob_global_cbar = fig.colorbar(prob_global_img, ax=prob_global_axes, fraction=0.008, pad=0.008, shrink=0.68)
+    prob_global_cbar = fig.colorbar(w_main_axes[0].images[0], cax=cax_w_main)
     prob_global_cbar.set_label('Row probability x source prevalence')
+    prob_global_diff_cbar = fig.colorbar(w_diff_axes[0].images[0], cax=cax_w_diff)
+    prob_global_diff_cbar.set_label('Weighted diff (Arena - Underground)')
 
     all_axes = top_axes + hist_axes + extra_hist_axes + count_axes + prob_axes + prob_global_axes
     grid_left = min(ax.get_position().x0 for ax in all_axes)
@@ -624,15 +707,15 @@ def plot_transition_matrices(
     fig.text(cx, r3_top + 0.2 * r3_h, 'Transition probabilities (row-normalized x call prob.)', ha='center', va='center', fontsize=12, fontweight='bold')
 
     # Interval super-titles per row: three interval groups (left/mid/right)
-    c_left_cx = (count_axes[0].get_position().x0 + count_axes[1].get_position().x1) / 2.0
-    c_mid_cx = (count_axes[2].get_position().x0 + count_axes[3].get_position().x1) / 2.0
-    c_right_cx = (count_axes[4].get_position().x0 + count_axes[5].get_position().x1) / 2.0
-    p_left_cx = (prob_axes[0].get_position().x0 + prob_axes[1].get_position().x1) / 2.0
-    p_mid_cx = (prob_axes[2].get_position().x0 + prob_axes[3].get_position().x1) / 2.0
-    p_right_cx = (prob_axes[4].get_position().x0 + prob_axes[5].get_position().x1) / 2.0
-    pg_left_cx = (prob_global_axes[0].get_position().x0 + prob_global_axes[1].get_position().x1) / 2.0
-    pg_mid_cx = (prob_global_axes[2].get_position().x0 + prob_global_axes[3].get_position().x1) / 2.0
-    pg_right_cx = (prob_global_axes[4].get_position().x0 + prob_global_axes[5].get_position().x1) / 2.0
+    c_left_cx = (count_axes[0].get_position().x0 + count_axes[2].get_position().x1) / 2.0
+    c_mid_cx = (count_axes[3].get_position().x0 + count_axes[5].get_position().x1) / 2.0
+    c_right_cx = (count_axes[6].get_position().x0 + count_axes[8].get_position().x1) / 2.0
+    p_left_cx = (prob_axes[0].get_position().x0 + prob_axes[2].get_position().x1) / 2.0
+    p_mid_cx = (prob_axes[3].get_position().x0 + prob_axes[5].get_position().x1) / 2.0
+    p_right_cx = (prob_axes[6].get_position().x0 + prob_axes[8].get_position().x1) / 2.0
+    pg_left_cx = (prob_global_axes[0].get_position().x0 + prob_global_axes[2].get_position().x1) / 2.0
+    pg_mid_cx = (prob_global_axes[3].get_position().x0 + prob_global_axes[5].get_position().x1) / 2.0
+    pg_right_cx = (prob_global_axes[6].get_position().x0 + prob_global_axes[8].get_position().x1) / 2.0
     left_txt = interval_left_label or (f'{interval_left}sec inter-call-interval' if interval_left is not None else 'inter-call-interval')
     mid_txt = interval_mid_label or (f'{interval_mid}sec inter-call-interval' if interval_mid is not None else 'inter-call-interval')
     right_txt = interval_right_label or (f'{interval_right}sec inter-call-interval' if interval_right is not None else 'inter-call-interval')
