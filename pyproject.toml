@@ -10,3 +10,9 @@ dependencies = [
     "scipy>=1.16.3",
     "tqdm>=4.67.1",
 ]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.2.0",
+    "jupyter>=1.1.1",
+]
