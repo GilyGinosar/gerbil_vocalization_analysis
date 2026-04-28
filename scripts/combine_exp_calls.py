@@ -28,8 +28,8 @@ from vocalization_analysis.pipelines.rms_assignment import (
 )
 
 # === Edit these before running ============================================
-#   EXPERIMENT_IDS = [504, 527, 546, 557, 566] # explicit list
-EXPERIMENT_IDS = list(range(333,345))     # inclusive 530..540
+#EXPERIMENT_IDS = [97,98,99] # explicit list
+EXPERIMENT_IDS = list(range(112,113))     # inclusive 530..540
 
 
 
@@ -95,6 +95,13 @@ def combine_for_experiment(exp: int) -> Path:
 
     combined_df = sort_calls_by_time(combined_df)
     qmc_df = build_qmc_metadata_csv(combined_df, source_channels)
+
+    # Carry through entropy columns from the DAS accepted_calls.csv files.
+    # Both build_qmc_metadata_csv and sort_calls_by_time use the same sort keys
+    # (file_num, onset_s), so combined_df and qmc_df rows are aligned by index.
+    for col in ("mean_entropy", "mean_entropy_norm"):
+        if col in combined_df.columns:
+            qmc_df[col] = combined_df[col].values
 
     out_path = exp_audio_dir / "calls.csv"
     qmc_df.to_csv(out_path, index=False)
