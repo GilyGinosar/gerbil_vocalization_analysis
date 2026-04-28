@@ -1,8 +1,24 @@
-import pandas as pd
+"""Library helpers for call-transition analysis.
+
+Public entry points (used by scripts/run_transitions.py):
+    - compute_and_save_arena_transitions
+    - plot_transition_matrices
+    - collect_inter_call_gaps
+    - collect_self_inter_call_gaps
+    - compute_shared_log_count_max
+
+Inputs are CSVs with the columns produced by scripts/run_transitions.add_exp_times:
+file_num, channel, event_type, start_time_experiment_sec, stop_time_experiment_sec,
+start_time_real, stop_time_real.
+
+This module no longer carries a top-level runner block; importing it has no
+side effects. To run an analysis, use scripts/run_transitions.py.
+"""
 import os
-import numpy as np
+
 import matplotlib.pyplot as plt
-from datetime import datetime, timedelta
+import numpy as np
+import pandas as pd
 
 CALL_TYPE_ORDER = [
     'pup', 'low','half-mnt', 'mnt', 'hat', 'ufm', 'tilda', 'warble',
@@ -42,19 +58,6 @@ def _canonicalize_call_type(value):
     return CALL_TYPE_CANONICAL_MAP.get(key, key)
 
 
-def _build_group_map(group_call_types=False, extra_group_map=None):
-    group_map = {}
-    if group_call_types:
-        group_map.update({
-            'ufm': 'high-freq',
-            'tilda': 'high-freq',
-            'hat': 'high-freq',
-        })
-    if extra_group_map:
-        group_map.update(extra_group_map)
-    return group_map
-
-
 def _effective_call_type_order(base_order, call_group_map):
     if not call_group_map:
         return list(base_order)
@@ -66,89 +69,7 @@ def _effective_call_type_order(base_order, call_group_map):
     return order
 
 
-def _filter_by_time_window(df, time_window='all'):
-    if time_window == 'all':
-        return df
-    if time_window not in {'day', 'night'}:
-        raise ValueError(f"Unsupported time_window: {time_window}")
-    if 'start_time_real' not in df.columns:
-        raise ValueError("`start_time_real` column is required for day/night filtering.")
-
-    filtered = df.copy()
-    filtered['_start_time_real_dt'] = pd.to_datetime(filtered['start_time_real'], errors='coerce')
-    filtered = filtered.dropna(subset=['_start_time_real_dt'])
-    hours = filtered['_start_time_real_dt'].dt.hour
-
-    if time_window == 'day':
-        # Daytime: 08:00 to 19:59
-        filtered = filtered[(hours >= 8) & (hours < 20)].copy()
-    else:
-        # Nighttime: 20:00 to 07:59
-        filtered = filtered[(hours >= 20) | (hours < 8)].copy()
-
-    return filtered
-
-
-def estimate_total_hours(csv_files, time_window='all'):
-    if isinstance(csv_files, str):
-        csv_paths = [csv_files]
-    else:
-        csv_paths = list(csv_files)
-
-    def overlap_seconds(a_start, a_end, b_start, b_end):
-        start = max(a_start, b_start)
-        end = min(a_end, b_end)
-        return max(0.0, (end - start).total_seconds())
-
-    def span_seconds_in_window(span_start, span_end, window):
-        if window == 'all':
-            return max(0.0, (span_end - span_start).total_seconds())
-        if window not in {'day', 'night'}:
-            raise ValueError(f"Unsupported time_window: {window}")
-
-        total = 0.0
-        # Iterate day by day across this experiment span.
-        day = span_start.date()
-        last_day = span_end.date()
-        while day <= last_day:
-            day_start = datetime.combine(day, datetime.min.time())
-            next_day = day_start + timedelta(days=1)
-            if window == 'day':
-                # 08:00-20:00
-                w_start = day_start + timedelta(hours=8)
-                w_end = day_start + timedelta(hours=20)
-                total += overlap_seconds(span_start, span_end, w_start, w_end)
-            else:
-                # Night is 20:00-24:00 and 00:00-08:00
-                w1_start = day_start
-                w1_end = day_start + timedelta(hours=8)
-                w2_start = day_start + timedelta(hours=20)
-                w2_end = next_day
-                total += overlap_seconds(span_start, span_end, w1_start, w1_end)
-                total += overlap_seconds(span_start, span_end, w2_start, w2_end)
-            day = day + timedelta(days=1)
-        return total
-
-    total_seconds = 0.0
-    for csv_path in csv_paths:
-        exp_df = pd.read_csv(csv_path)
-        if not {'start_time_real', 'stop_time_real'}.issubset(exp_df.columns):
-            continue
-
-        starts = pd.to_datetime(exp_df['start_time_real'], errors='coerce')
-        stops = pd.to_datetime(exp_df['stop_time_real'], errors='coerce')
-        valid = (~starts.isna()) & (~stops.isna()) & (stops >= starts)
-        if not valid.any():
-            continue
-
-        span_start = starts[valid].min().to_pydatetime()
-        span_end = stops[valid].max().to_pydatetime()
-        total_seconds += span_seconds_in_window(span_start, span_end, time_window)
-
-    return total_seconds / 3600.0
-
-
-def collect_inter_call_gaps(csv_files, time_window='all'):
+def collect_inter_call_gaps(csv_files):
     if isinstance(csv_files, str):
         csv_paths = [csv_files]
     else:
@@ -159,7 +80,6 @@ def collect_inter_call_gaps(csv_files, time_window='all'):
         source_name = os.path.basename(os.path.dirname(csv_path)) or os.path.basename(csv_path)
         df = pd.read_csv(csv_path)
         df['_source_exp'] = source_name
-        df = _filter_by_time_window(df, time_window=time_window)
         df = df.dropna(subset=['event_type', 'start_time_experiment_sec', 'stop_time_experiment_sec']).copy()
         df = df[df['event_type'] != 'noise']
         if df.empty:
@@ -174,7 +94,7 @@ def collect_inter_call_gaps(csv_files, time_window='all'):
     return np.array(gaps, dtype=float)
 
 
-def collect_self_inter_call_gaps(csv_files, target_call_type, time_window='all', call_group_map=None):
+def collect_self_inter_call_gaps(csv_files, target_call_type, call_group_map=None):
     if isinstance(csv_files, str):
         csv_paths = [csv_files]
     else:
@@ -186,7 +106,6 @@ def collect_self_inter_call_gaps(csv_files, target_call_type, time_window='all',
         source_name = os.path.basename(os.path.dirname(csv_path)) or os.path.basename(csv_path)
         df = pd.read_csv(csv_path)
         df['_source_exp'] = source_name
-        df = _filter_by_time_window(df, time_window=time_window)
         df = df.dropna(subset=['event_type', 'start_time_experiment_sec', 'stop_time_experiment_sec']).copy()
         df['event_type'] = df['event_type'].map(_canonicalize_call_type)
         if call_group_map:
@@ -202,6 +121,81 @@ def collect_self_inter_call_gaps(csv_files, target_call_type, time_window='all',
                 if pd.notna(gap) and gap >= 0:
                     gaps.append(float(gap))
     return np.array(gaps, dtype=float)
+
+
+def plot_inter_call_gap_distribution(
+    gaps,
+    thresholds,
+    output_path,
+    title='',
+    n_bins=100,
+    xmax_sec=1000.0,
+):
+    """Wide single-axis histogram of inter-call gaps for threshold inspection.
+
+    Plots all positive gaps on a log-x scale with vertical dashed lines at the
+    given thresholds, plus a cumulative-fraction overlay so it's easy to read
+    off what fraction of gaps fall below each threshold.
+
+    Args:
+        gaps: 1-D array of gap durations in seconds.
+        thresholds: iterable of threshold values (sec) to mark with vlines.
+        output_path: where to save the PNG.
+        title: optional figure title.
+        n_bins: number of geometric (log-spaced) bins for the histogram.
+        xmax_sec: x-axis upper bound. Bins and view are capped here; gaps
+            beyond this are excluded from the histogram (but remain in the
+            CDF), and the count is reported in the subtitle.
+    """
+    gaps = np.asarray(gaps, dtype=float)
+    positive = gaps[gaps > 0]
+    if positive.size == 0:
+        print("plot_inter_call_gap_distribution: no positive gaps to plot.")
+        return None
+
+    xmin = max(1e-3, float(positive.min()))
+    xmax = min(float(positive.max()), float(xmax_sec))
+    n_beyond = int((positive > xmax_sec).sum())
+    bins = np.geomspace(xmin, xmax, n_bins)
+
+    fig, ax = plt.subplots(figsize=(18, 5))
+    ax.hist(positive, bins=bins, color='#6C757D', edgecolor='white', linewidth=0.4)
+    ax.set_xscale('log')
+    ax.set_xlabel('Inter-call interval (sec)')
+    ax.set_ylabel('Count')
+    ax.spines['top'].set_visible(False)
+    ax.set_xlim(xmin, xmax)
+
+    # CDF overlay on a secondary axis.
+    sorted_gaps = np.sort(positive)
+    cdf = np.arange(1, sorted_gaps.size + 1) / sorted_gaps.size
+    ax_cdf = ax.twinx()
+    ax_cdf.plot(sorted_gaps, cdf, color='#457B9D', linewidth=1.4, alpha=0.85)
+    ax_cdf.set_ylabel('Cumulative fraction', color='#457B9D')
+    ax_cdf.tick_params(axis='y', labelcolor='#457B9D')
+    ax_cdf.set_ylim(0, 1.0)
+    ax_cdf.spines['top'].set_visible(False)
+
+    # Threshold markers + annotations with fraction-below.
+    y_top = ax.get_ylim()[1]
+    for thresh in thresholds:
+        ax.axvline(thresh, color='#E63946', linestyle='--', linewidth=1.2, alpha=0.85)
+        frac_below = float((positive <= thresh).mean())
+        ax.text(
+            thresh, y_top * 0.97,
+            f' {thresh}s ({frac_below*100:.1f}% ≤)',
+            rotation=90, va='top', ha='left', fontsize=9, color='#E63946',
+        )
+
+    base_title = title or f'Inter-call interval distribution (n={positive.size:,})'
+    if n_beyond:
+        base_title = f"{base_title}  —  {n_beyond:,} gaps > {xmax_sec:g}s not shown"
+    ax.set_title(base_title)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"Saved gap-distribution plot: {output_path}")
+    return output_path
 
 
 def compute_shared_log_count_max(output_dirs, arena_names=('arena', 'underground')):
@@ -224,20 +218,21 @@ def compute_and_save_arena_transitions(
     csv_files,
     inter_call_interval_sec,
     output_dir='transition_results',
-    time_window='all',
     min_inter_call_interval_sec=None,
     call_group_map=None,
     call_type_order=None,
     file_tag=''
 ):
     """
-    Parses one or more consolidated step4 CSVs by channel, computes transitions,
+    Parses one or more consolidated CSVs by channel, computes transitions,
     and saves results to a specified directory.
 
     Notes:
     - `csv_files` can be a single path or a list of paths.
     - Transitions are computed within each source CSV independently
-      (no transitions are counted across experiment-file boundaries).
+      (no transitions are counted across experiments).
+    - Day/night filtering must be applied upstream by the caller; this function
+      does not look at clock time.
     """
     # 1. Create output directory if it doesn't exist
     if not os.path.exists(output_dir):
@@ -266,10 +261,7 @@ def compute_and_save_arena_transitions(
 
         df = pd.concat(all_dfs, ignore_index=True)
 
-        # 2. Optional daytime/nighttime filtering
-        df = _filter_by_time_window(df, time_window=time_window)
-
-        # 3. Cleaning: Remove noise and handle time scales
+        # 2. Cleaning: drop missing events, canonicalize labels, drop 'noise'.
         df = df.dropna(subset=['event_type', 'start_time_experiment_sec']).copy()
         df['event_type'] = df['event_type'].map(_canonicalize_call_type)
         if call_group_map:
@@ -279,7 +271,7 @@ def compute_and_save_arena_transitions(
             call_type_order = _effective_call_type_order(CALL_TYPE_ORDER, call_group_map or {})
         df = df[df['event_type'].isin(call_type_order)]
         if df.empty:
-            raise ValueError(f"No rows remain after applying time filter '{time_window}'.")
+            raise ValueError("No rows remain after cleaning input.")
 
         # Use fixed call-type order for all outputs, even if some are absent.
         all_call_types = list(call_type_order)
@@ -303,7 +295,10 @@ def compute_and_save_arena_transitions(
                     # Gap between end of current and start of next
                     gap = nxt['start_time_experiment_sec'] - curr['stop_time_experiment_sec']
 
-                    lower_ok = True if min_inter_call_interval_sec is None else (gap > min_inter_call_interval_sec)
+                    if min_inter_call_interval_sec is not None:
+                        lower_ok = gap > min_inter_call_interval_sec
+                    else:
+                        lower_ok = gap >= 0   # reject overlapping calls (negative gap)
                     if lower_ok and gap <= inter_call_interval_sec:
                         matrix.loc[curr['event_type'], nxt['event_type']] += 1
 
@@ -363,10 +358,17 @@ def plot_transition_matrices(
     self_ici_gaps_by_type=None,
     self_ici_call_types=None,
     shared_log_count_max=None,
+    hist_full_bins=None,
+    hist_full_ymax=None,
+    hist_zoom_ymax=None,
+    self_ici_ymax_by_type=None,
+    thresholds=None,
+    hist_full_xmax_sec=1000.0,
     call_type_order=None,
     file_tag_left='',
     file_tag_mid='',
-    file_tag_right=''
+    file_tag_right='',
+    figure_title=None,
 ):
     """
     Row 1: call proportions (2 panels, unchanged style).
@@ -378,32 +380,68 @@ def plot_transition_matrices(
     if call_type_order is None:
         call_type_order = CALL_TYPE_ORDER
 
-    fig = plt.figure(figsize=(52, 28), constrained_layout=False)
-    gs = fig.add_gridspec(4, 9, height_ratios=[0.2, 1.0, 1.0, 1.0], hspace=0.10, wspace=0.24)
-    fig.subplots_adjust(top=0.93)
+    # Layout (11 rows):
+    #   0: within-location proportions (cols 0-1)
+    #   1: across-locations proportions (cols 0-1) — pushed slightly down
+    #   2: ICI full (wide, log-x, threshold lines + CDF)
+    #   3: ICI zoom (wide, 0-3s linear)
+    #   4..7: per-call-type self-ICI (one wide row each)
+    #   8: count matrices (9 cols)
+    #   9: probability matrices (row-normalized) (9 cols)
+    #   10: joint matrices (9 cols)
+    # 18-column gridspec so we can size things in finer-than-1/9 increments:
+    # matrix panels span 2 cols each (× 9 panels = 18 cols, same widths as before),
+    # histograms span 3 cols on the right (1/6 of figure width — about half the
+    # width they had at 3/9 = 1/3), and proportion panels span 3 cols each (a
+    # bit wider than before).
+    fig = plt.figure(figsize=(52, 40), constrained_layout=False)
+    gs = fig.add_gridspec(
+        11, 18,
+        height_ratios=[0.65, 0.65, 0.45, 0.45, 0.30, 0.30, 0.30, 0.30, 1.0, 1.0, 1.0],
+        hspace=0.85, wspace=0.24,
+    )
+    fig.subplots_adjust(top=0.95)
 
-    # Top row: manual placement so it keeps prior sizing and does not follow matrix columns.
-    top_axes = [
-        fig.add_axes([0.06, 0.856, 0.15, 0.094]),   # Arena proportions
-        fig.add_axes([0.25, 0.856, 0.15, 0.094])    # Underground proportions
-    ]
-    hist_axes = [
-        fig.add_axes([0.47, 0.856, 0.07, 0.094]),   # ICI full
-        fig.add_axes([0.57, 0.856, 0.07, 0.094])    # ICI zoom
-    ]
-    extra_hist_axes = [
-        fig.add_axes([0.67, 0.856, 0.055, 0.094]),
-        fig.add_axes([0.735, 0.856, 0.055, 0.094]),
-        fig.add_axes([0.80, 0.856, 0.055, 0.094]),
-        fig.add_axes([0.865, 0.856, 0.055, 0.094]),
-    ]
-    count_axes = [fig.add_subplot(gs[1, c]) for c in range(9)]
-    prob_axes = [fig.add_subplot(gs[2, c]) for c in range(9)]
-    prob_global_axes = [fig.add_subplot(gs[3, c]) for c in range(9)]
+    top_axes = [fig.add_subplot(gs[0, 0:3]), fig.add_subplot(gs[0, 3:6])]
+    top_axes_global = [fig.add_subplot(gs[1, 0:3]), fig.add_subplot(gs[1, 3:6])]
+    # Histograms: stacked vertically on the right side of the figure.
+    hist_axes = [fig.add_subplot(gs[2, 15:18]), fig.add_subplot(gs[3, 15:18])]   # [full, zoom]
+    extra_hist_axes = [fig.add_subplot(gs[4 + i, 15:18]) for i in range(4)]
+    count_axes = [fig.add_subplot(gs[8, 2*c:2*c+2]) for c in range(9)]
+    prob_axes = [fig.add_subplot(gs[9, 2*c:2*c+2]) for c in range(9)]
+    prob_global_axes = [fig.add_subplot(gs[10, 2*c:2*c+2]) for c in range(9)]
 
     if row_y_shift is None:
-        row_y_shift = {0: -0.08, 1: -0.13, 2: -0.1, 3: -0.08}
-    for r, row_axes in {0: top_axes + hist_axes + extra_hist_axes, 1: count_axes, 2: prob_axes, 3: prob_global_axes}.items():
+        row_y_shift = {
+            0: 0.0,
+            1: -0.07,    # push global proportions further down — row 0 is now taller
+
+            2: 0.0,
+            3: 0.0,
+            4: 0.0,
+            5: 0.0,
+            6: 0.0,
+            7: 0.0,
+            # Differential shifts on matrix rows: each successive row pushed
+            # further down so the inter-row gap (where row super-titles live)
+            # is wider and tick labels stop occluding the row above.
+            8: -0.02,
+            9: -0.07,
+            10: -0.12,
+        }
+    for r, row_axes in {
+        0: top_axes,
+        1: top_axes_global,
+        2: [hist_axes[0]],
+        3: [hist_axes[1]],
+        4: [extra_hist_axes[0]],
+        5: [extra_hist_axes[1]],
+        6: [extra_hist_axes[2]],
+        7: [extra_hist_axes[3]],
+        8: count_axes,
+        9: prob_axes,
+        10: prob_global_axes,
+    }.items():
         dy = float(row_y_shift.get(r, 0.0))
         if dy != 0.0:
             for ax in row_axes:
@@ -448,6 +486,12 @@ def plot_transition_matrices(
     if shared_log_count_max is not None:
         global_log_count_max = float(shared_log_count_max)
 
+    # Total calls across all locations — denominator for the global-norm row.
+    grand_total_calls = sum(
+        int(call_count_series[a].reindex(call_type_order, fill_value=0).sum())
+        for a in arena_names
+    )
+
     for i, arena in enumerate(arena_names):
         area_title = 'Arena' if arena == 'arena' else 'Underground'
         calls_s = call_count_series[arena].reindex(call_type_order, fill_value=0)
@@ -455,7 +499,7 @@ def plot_transition_matrices(
         call_props = calls_s / total_calls if total_calls > 0 else calls_s.astype(float)
 
         x = np.arange(len(calls_s.index))
-        bars = top_axes[i].bar(x, call_props.values, color=[_call_color(ct) for ct in calls_s.index])
+        bars = top_axes[i].bar(x, call_props.values, color='#6C757D')
         top_axes[i].set_title(f'{area_title} (N_calls = {total_calls})')
         top_axes[i].set_ylim(0, 1)
         top_axes[i].set_xticks(x)
@@ -469,41 +513,108 @@ def plot_transition_matrices(
                 ha='center', va='bottom', fontsize=8, rotation=90, clip_on=False
             )
 
-    # Top-right: two inter-call-interval histograms from the input data for this plot.
+        # Same bars but normalized by total calls across ALL locations.
+        if grand_total_calls > 0:
+            call_props_global = calls_s / grand_total_calls
+        else:
+            call_props_global = calls_s.astype(float) * 0.0
+
+        bars_g = top_axes_global[i].bar(x, call_props_global.values, color='#6C757D')
+        loc_share_pct = (total_calls / grand_total_calls * 100) if grand_total_calls > 0 else 0.0
+        top_axes_global[i].set_title(
+            f'{area_title} (relative to all {grand_total_calls:,} calls — '
+            f'{area_title.lower()} = {loc_share_pct:.1f}%)'
+        )
+        top_axes_global[i].set_ylim(0, 1)
+        top_axes_global[i].set_xticks(x)
+        top_axes_global[i].set_xticklabels(calls_s.index, rotation=90)
+        top_axes_global[i].set_ylabel('Proportion of total')
+        top_axes_global[i].spines['top'].set_visible(False)
+        top_axes_global[i].spines['right'].set_visible(False)
+        for b, n_calls in zip(bars_g, calls_s.values):
+            top_axes_global[i].text(
+                b.get_x() + b.get_width() / 2, b.get_height() + 0.02, f'n={int(n_calls)}',
+                ha='center', va='bottom', fontsize=8, rotation=90, clip_on=False
+            )
+
+    # Wide ICI histograms: full (log-x, with threshold markers + CDF overlay)
+    # and zoom (0-3 s linear). Each spans the full figure width.
     if inter_call_gaps is not None and len(inter_call_gaps) > 0:
         positive_gaps = inter_call_gaps[inter_call_gaps > 0]
         hist_ax = hist_axes[0]
         if len(positive_gaps) > 0:
-            bins = np.geomspace(max(1e-3, positive_gaps.min()), positive_gaps.max(), 40)
+            # Shared bins across variants when provided.
+            if hist_full_bins is not None:
+                bins = hist_full_bins
+            else:
+                xmax = min(float(positive_gaps.max()), float(hist_full_xmax_sec))
+                bins = np.geomspace(max(1e-3, float(positive_gaps.min())), xmax, 100)
             hist_ax.hist(positive_gaps, bins=bins, color='#6C757D', edgecolor='white', linewidth=0.4)
             hist_ax.set_xscale('log')
+            xmin = float(bins[0])
+            xmax = float(bins[-1])
+            hist_ax.set_xlim(xmin, xmax)
         else:
             hist_ax.hist(inter_call_gaps, bins=30, color='#6C757D', edgecolor='white', linewidth=0.4)
-        hist_ax.set_title('Inter-call-interval (full)')
-        hist_ax.set_xlabel('Interval (sec)')
-        hist_ax.set_ylabel('Count')
+
+        n_beyond = int((positive_gaps > hist_full_xmax_sec).sum()) if len(positive_gaps) else 0
+        title = f'Inter-call interval (full, n={len(positive_gaps):,})'
+        if n_beyond:
+            title += f'  —  {n_beyond:,} > {hist_full_xmax_sec:g}s not shown'
+        hist_ax.set_title(title, fontsize=12)
+        hist_ax.set_xlabel('Interval (sec)', fontsize=11)
+        hist_ax.set_ylabel('Count', fontsize=11)
         hist_ax.spines['top'].set_visible(False)
-        hist_ax.spines['right'].set_visible(False)
+        if hist_full_ymax is not None and hist_full_ymax > 0:
+            hist_ax.set_ylim(0, hist_full_ymax * 1.05)
+
+        # Cumulative-fraction overlay on a secondary axis.
+        if len(positive_gaps) > 0:
+            sorted_gaps = np.sort(positive_gaps)
+            cdf = np.arange(1, sorted_gaps.size + 1) / sorted_gaps.size
+            ax_cdf = hist_ax.twinx()
+            ax_cdf.plot(sorted_gaps, cdf, color='#457B9D', linewidth=1.4, alpha=0.85)
+            ax_cdf.set_ylabel('Cumulative fraction', color='#457B9D', fontsize=11)
+            ax_cdf.tick_params(axis='y', labelcolor='#457B9D')
+            ax_cdf.set_ylim(0, 1.0)
+            ax_cdf.spines['top'].set_visible(False)
+
+        # Threshold markers (gap-band boundaries) with annotation.
+        if thresholds and len(positive_gaps) > 0:
+            y_top = hist_ax.get_ylim()[1]
+            for thresh in thresholds:
+                hist_ax.axvline(thresh, color='#E63946', linestyle='--', linewidth=1.4, alpha=0.85)
+                frac_below = float((positive_gaps <= thresh).mean())
+                hist_ax.text(
+                    thresh, y_top * 0.97,
+                    f' {thresh}s ({frac_below*100:.1f}% ≤)',
+                    rotation=90, va='top', ha='left', fontsize=10, color='#E63946',
+                )
 
         zoom_ax = hist_axes[1]
         zoom_min = 0.05
         zoom_max = 3.0
-        zoom_bin_w = 0.1
-        zoom_data = inter_call_gaps[(inter_call_gaps >= 0.0) & (inter_call_gaps <= zoom_max)]
+        zoom_bins = np.geomspace(zoom_min, zoom_max, 30)
+        zoom_data = inter_call_gaps[(inter_call_gaps >= zoom_min) & (inter_call_gaps <= zoom_max)]
         if len(zoom_data) > 0:
-            # Fixed 0.1s bin edges aligned to 0 so first bin is [0.0, 0.1).
-            zoom_bins = np.arange(0.0, zoom_max + zoom_bin_w, zoom_bin_w)
             zoom_ax.hist(zoom_data, bins=zoom_bins, color='#ADB5BD', edgecolor='white', linewidth=0.4)
+        zoom_ax.set_xscale('log')
         zoom_ax.set_xlim(zoom_min, zoom_max)
-        zoom_ticks = np.arange(0.1, zoom_max + 1e-9, 0.1)
-        zoom_tick_labels = [f'{t:.1f}' if abs((t / 0.5) - round(t / 0.5)) < 1e-9 else '' for t in zoom_ticks]
+        if hist_zoom_ymax is not None and hist_zoom_ymax > 0:
+            zoom_ax.set_ylim(0, hist_zoom_ymax * 1.05)
+        zoom_ticks = [0.05, 0.1, 0.3, 0.5, 1.0, 2.0, 3.0]
         zoom_ax.set_xticks(zoom_ticks)
-        zoom_ax.set_xticklabels(zoom_tick_labels)
-        zoom_ax.set_title('Inter-call-interval (0.05-3s)')
-        zoom_ax.set_xlabel('Interval (sec)')
-        zoom_ax.set_ylabel('Count')
+        zoom_ax.set_xticklabels([f'{t:g}' for t in zoom_ticks], fontsize=10)
+        zoom_ax.set_title('Inter-call interval (0.05-3 s)', fontsize=12)
+        zoom_ax.set_xlabel('Interval (sec)', fontsize=11)
+        zoom_ax.set_ylabel('Count', fontsize=11)
         zoom_ax.spines['top'].set_visible(False)
         zoom_ax.spines['right'].set_visible(False)
+        # Mark thresholds that fall in the zoom range.
+        if thresholds:
+            for thresh in thresholds:
+                if zoom_min <= thresh <= zoom_max:
+                    zoom_ax.axvline(thresh, color='#E63946', linestyle='--', linewidth=1.2, alpha=0.85)
     else:
         for ax in hist_axes:
             ax.set_axis_off()
@@ -517,21 +628,29 @@ def plot_transition_matrices(
         gaps = self_ici_gaps_by_type.get(call_type, np.array([]))
         zoom_min = 0.05
         zoom_max = 3.0
-        zoom_bin_w = 0.1
-        zoom_data = gaps[(gaps >= 0.0) & (gaps <= zoom_max)] if len(gaps) > 0 else np.array([])
+        zoom_bins = np.geomspace(zoom_min, zoom_max, 30)
+        zoom_data = gaps[(gaps >= zoom_min) & (gaps <= zoom_max)] if len(gaps) > 0 else np.array([])
         if len(zoom_data) > 0:
-            zoom_bins = np.arange(0.0, zoom_max + zoom_bin_w, zoom_bin_w)
             ax.hist(zoom_data, bins=zoom_bins, color='#CED4DA', edgecolor='white', linewidth=0.4)
+        ax.set_xscale('log')
         ax.set_xlim(zoom_min, zoom_max)
-        zoom_ticks = np.arange(0.1, zoom_max + 1e-9, 0.1)
-        zoom_tick_labels = [f'{t:.1f}' if abs((t / 0.5) - round(t / 0.5)) < 1e-9 else '' for t in zoom_ticks]
+        if self_ici_ymax_by_type is not None:
+            shared_y = self_ici_ymax_by_type.get(call_type, 0)
+            if shared_y > 0:
+                ax.set_ylim(0, shared_y * 1.05)
+        zoom_ticks = [0.05, 0.1, 0.3, 0.5, 1.0, 2.0, 3.0]
         ax.set_xticks(zoom_ticks)
-        ax.set_xticklabels(zoom_tick_labels, fontsize=7)
-        ax.set_title(f'{call_type} -> {call_type}', fontsize=8)
-        ax.set_xlabel('sec', fontsize=7)
-        ax.set_ylabel('n', fontsize=7)
+        ax.set_xticklabels([f'{t:g}' for t in zoom_ticks], fontsize=10)
+        n_self = len(zoom_data)
+        ax.set_title(f'Self-ICI: {call_type} -> {call_type}  (n={n_self:,})', fontsize=12)
+        ax.set_xlabel('Interval (sec)', fontsize=11)
+        ax.set_ylabel('Count', fontsize=11)
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
+        if thresholds:
+            for thresh in thresholds:
+                if zoom_min <= thresh <= zoom_max:
+                    ax.axvline(thresh, color='#E63946', linestyle='--', linewidth=1.0, alpha=0.7)
     for ax in extra_hist_axes[len(self_ici_call_types[:len(extra_hist_axes)]):]:
         ax.set_axis_off()
 
@@ -564,15 +683,16 @@ def plot_transition_matrices(
         p_und = pdict['underground']
         p_diff = p_arena - p_und
 
-        def weighted(pdf, arena_key):
-            src_calls = call_count_series[arena_key].reindex(pdf.index, fill_value=0).astype(float)
-            total_calls = float(src_calls.sum())
-            if total_calls > 0:
-                return pdf.mul(src_calls / total_calls, axis=0)
-            return pd.DataFrame(0.0, index=pdf.index, columns=pdf.columns)
+        def joint(cdf):
+            """Joint probability of transition: count(a->b) / total_transitions.
+            Sums to 1 over the whole matrix when there are any transitions."""
+            total = float(cdf.values.sum())
+            if total > 0:
+                return cdf.astype(float) / total
+            return pd.DataFrame(0.0, index=cdf.index, columns=cdf.columns)
 
-        w_arena = weighted(p_arena, 'arena')
-        w_und = weighted(p_und, 'underground')
+        w_arena = joint(c_arena)
+        w_und = joint(c_und)
         w_diff = w_arena - w_und
 
         count_diff_max = max(count_diff_max, float(np.abs(c_diff.values).max()))
@@ -680,11 +800,11 @@ def plot_transition_matrices(
     prob_diff_cbar.set_label('Diff (Arena - Underground)')
 
     prob_global_cbar = fig.colorbar(w_main_axes[0].images[0], cax=cax_w_main)
-    prob_global_cbar.set_label('Row probability x source prevalence')
+    prob_global_cbar.set_label('Joint transition probability  count(a->b) / total transitions')
     prob_global_diff_cbar = fig.colorbar(w_diff_axes[0].images[0], cax=cax_w_diff)
-    prob_global_diff_cbar.set_label('Weighted diff (Arena - Underground)')
+    prob_global_diff_cbar.set_label('Joint diff (Arena - Underground)')
 
-    all_axes = top_axes + hist_axes + extra_hist_axes + count_axes + prob_axes + prob_global_axes
+    all_axes = top_axes + top_axes_global + hist_axes + extra_hist_axes + count_axes + prob_axes + prob_global_axes
     grid_left = min(ax.get_position().x0 for ax in all_axes)
     grid_right = max(ax.get_position().x1 for ax in all_axes)
     cx = (grid_left + grid_right) / 2.0
@@ -692,19 +812,22 @@ def plot_transition_matrices(
     top_right = max(ax.get_position().x1 for ax in top_axes)
     top_cx = (top_left + top_right) / 2.0
     r0_top = max(ax.get_position().y1 for ax in top_axes)
+    r0g_top = max(ax.get_position().y1 for ax in top_axes_global)
     r1_top = max(ax.get_position().y1 for ax in count_axes)
     r2_top = max(ax.get_position().y1 for ax in prob_axes)
     r3_top = max(ax.get_position().y1 for ax in prob_global_axes)
     r0_h = np.mean([ax.get_position().height for ax in top_axes])
+    r0g_h = np.mean([ax.get_position().height for ax in top_axes_global])
     r1_h = np.mean([ax.get_position().height for ax in count_axes])
     r2_h = np.mean([ax.get_position().height for ax in prob_axes])
     r3_h = np.mean([ax.get_position().height for ax in prob_global_axes])
 
     # Main row super-titles
-    fig.text(top_cx, r0_top + 0.4 * r0_h, 'Call proportions', ha='center', va='center', fontsize=12, fontweight='bold')
+    fig.text(top_cx, r0_top + 0.4 * r0_h, 'Call proportions (within location)', ha='center', va='center', fontsize=12, fontweight='bold')
+    fig.text(top_cx, r0g_top + 0.4 * r0g_h, 'Call proportions (across all locations)', ha='center', va='center', fontsize=12, fontweight='bold')
     fig.text(cx, r1_top + 0.2 * r1_h, 'Transition counts', ha='center', va='center', fontsize=12, fontweight='bold')
     fig.text(cx, r2_top + 0.2 * r2_h, 'Transition probabilities (row-normalized)', ha='center', va='center', fontsize=12, fontweight='bold')
-    fig.text(cx, r3_top + 0.2 * r3_h, 'Transition probabilities (row-normalized x call prob.)', ha='center', va='center', fontsize=12, fontweight='bold')
+    fig.text(cx, r3_top + 0.2 * r3_h, 'Joint transition probability (count(a->b) / total transitions)', ha='center', va='center', fontsize=12, fontweight='bold')
 
     # Interval super-titles per row: three interval groups (left/mid/right)
     c_left_cx = (count_axes[0].get_position().x0 + count_axes[2].get_position().x1) / 2.0
@@ -729,214 +852,10 @@ def plot_transition_matrices(
     fig.text(pg_mid_cx, r3_top + 0.08 * r3_h, mid_txt, ha='center', va='center', fontsize=10)
     fig.text(pg_right_cx, r3_top + 0.08 * r3_h, right_txt, ha='center', va='center', fontsize=10)
 
-    fig.suptitle('', fontsize=14, y=0.995)
+    fig.suptitle(figure_title or '', fontsize=22, fontweight='bold', y=0.995)
     if plot_note:
         fig.text(0.5, 0.972, plot_note, ha='center', va='top', fontsize=10)
     plot_path = os.path.join(output_dir_left, save_name)
     fig.savefig(plot_path, dpi=200, bbox_inches='tight')
     plt.show()
     print(f"Saved plot to: {os.path.abspath(plot_path)}")
-
-
-# Run the script with full input/output paths
-date_exp = '2025_10'
-exp_list = [273,275,276]  # e.g., [275, 276, 277]
-very_short_gap_sec = 0.05
-short_gap_sec = 0.3
-long_gap_sec = 300
-group_call_types = True
-# Add future consolidations here, e.g. {'warble': 'high-freq'} or {'mnt': 'mnt-family'}
-extra_call_group_map = {}
-call_group_map = _build_group_map(group_call_types=group_call_types, extra_group_map=extra_call_group_map)
-effective_call_type_order = _effective_call_type_order(CALL_TYPE_ORDER, call_group_map)
-self_ici_call_types = ['high-freq', 'warble', 'alarm', 'dense-stack']
-
-input_csvs = [
-    fr"Z:\ginosar\Processed_data\Audio\{date_exp}\{exp}\step4_assigned_location.csv"
-    for exp in exp_list
-]
-
-exp_names = ", ".join(str(e) for e in exp_list)
-
-# All CSVs and figures go into one folder; each run uses a unique file tag.
-output_folder = fr"Z:\ginosar\Processed_data\Audio\{date_exp}\combined_transitions_outputs"
-
-tag_all_left = "all_gt0p3_le300"
-tag_all_mid = "all_gt0p05_le0p3"
-tag_all_right = "all_le0p05"
-tag_day_left = "day_gt0p3_le300"
-tag_day_mid = "day_gt0p05_le0p3"
-tag_day_right = "day_le0p05"
-tag_night_left = "night_gt0p3_le300"
-tag_night_mid = "night_gt0p05_le0p3"
-tag_night_right = "night_le0p05"
-
-# All data
-compute_and_save_arena_transitions(
-    input_csvs,
-    inter_call_interval_sec=long_gap_sec,
-    output_dir=output_folder,
-    time_window='all',
-    min_inter_call_interval_sec=short_gap_sec,
-    call_group_map=call_group_map,
-    call_type_order=effective_call_type_order,
-    file_tag=tag_all_left
-)
-compute_and_save_arena_transitions(
-    input_csvs,
-    inter_call_interval_sec=short_gap_sec,
-    output_dir=output_folder,
-    time_window='all',
-    min_inter_call_interval_sec=very_short_gap_sec,
-    call_group_map=call_group_map,
-    call_type_order=effective_call_type_order,
-    file_tag=tag_all_mid
-)
-compute_and_save_arena_transitions(
-    input_csvs,
-    inter_call_interval_sec=very_short_gap_sec,
-    output_dir=output_folder,
-    time_window='all',
-    call_group_map=call_group_map,
-    call_type_order=effective_call_type_order,
-    file_tag=tag_all_right
-)
-hours_all = estimate_total_hours(input_csvs, time_window='all')
-gaps_all = collect_inter_call_gaps(input_csvs, time_window='all')
-self_ici_gaps_all = {ct: collect_self_inter_call_gaps(input_csvs, ct, time_window='all', call_group_map=call_group_map) for ct in self_ici_call_types}
-plot_note_all = f"Exps: {exp_names} | Total analyzed duration: {hours_all:.2f} h"
-
-# Daytime only
-compute_and_save_arena_transitions(
-    input_csvs,
-    inter_call_interval_sec=long_gap_sec,
-    output_dir=output_folder,
-    time_window='day',
-    min_inter_call_interval_sec=short_gap_sec,
-    call_group_map=call_group_map,
-    call_type_order=effective_call_type_order,
-    file_tag=tag_day_left
-)
-compute_and_save_arena_transitions(
-    input_csvs,
-    inter_call_interval_sec=short_gap_sec,
-    output_dir=output_folder,
-    time_window='day',
-    min_inter_call_interval_sec=very_short_gap_sec,
-    call_group_map=call_group_map,
-    call_type_order=effective_call_type_order,
-    file_tag=tag_day_mid
-)
-compute_and_save_arena_transitions(
-    input_csvs,
-    inter_call_interval_sec=very_short_gap_sec,
-    output_dir=output_folder,
-    time_window='day',
-    call_group_map=call_group_map,
-    call_type_order=effective_call_type_order,
-    file_tag=tag_day_right
-)
-hours_day = estimate_total_hours(input_csvs, time_window='day')
-gaps_day = collect_inter_call_gaps(input_csvs, time_window='day')
-self_ici_gaps_day = {ct: collect_self_inter_call_gaps(input_csvs, ct, time_window='day', call_group_map=call_group_map) for ct in self_ici_call_types}
-plot_note_day = f"Exps: {exp_names} | Daytime (08:00-20:00) | Total analyzed duration: {hours_day:.2f} h"
-
-# Nighttime only
-compute_and_save_arena_transitions(
-    input_csvs,
-    inter_call_interval_sec=long_gap_sec,
-    output_dir=output_folder,
-    time_window='night',
-    min_inter_call_interval_sec=short_gap_sec,
-    call_group_map=call_group_map,
-    call_type_order=effective_call_type_order,
-    file_tag=tag_night_left
-)
-compute_and_save_arena_transitions(
-    input_csvs,
-    inter_call_interval_sec=short_gap_sec,
-    output_dir=output_folder,
-    time_window='night',
-    min_inter_call_interval_sec=very_short_gap_sec,
-    call_group_map=call_group_map,
-    call_type_order=effective_call_type_order,
-    file_tag=tag_night_mid
-)
-compute_and_save_arena_transitions(
-    input_csvs,
-    inter_call_interval_sec=very_short_gap_sec,
-    output_dir=output_folder,
-    time_window='night',
-    call_group_map=call_group_map,
-    call_type_order=effective_call_type_order,
-    file_tag=tag_night_right
-)
-hours_night = estimate_total_hours(input_csvs, time_window='night')
-gaps_night = collect_inter_call_gaps(input_csvs, time_window='night')
-self_ici_gaps_night = {ct: collect_self_inter_call_gaps(input_csvs, ct, time_window='night', call_group_map=call_group_map) for ct in self_ici_call_types}
-plot_note_night = f"Exps: {exp_names} | Nighttime (20:00-08:00) | Total analyzed duration: {hours_night:.2f} h"
-
-# Shared count color scale across all 3 figures.
-shared_log_count_max = compute_shared_log_count_max([
-    (output_folder, tag_all_left), (output_folder, tag_all_mid), (output_folder, tag_all_right),
-    (output_folder, tag_day_left), (output_folder, tag_day_mid), (output_folder, tag_day_right),
-    (output_folder, tag_night_left), (output_folder, tag_night_mid), (output_folder, tag_night_right),
-], arena_names=('arena', 'underground'))
-
-plot_transition_matrices(
-    output_folder, output_folder, output_folder,
-    save_name='transition_matrices_overview.png',
-    plot_note=plot_note_all,
-    interval_left=long_gap_sec,
-    interval_mid=short_gap_sec,
-    interval_right=very_short_gap_sec,
-    interval_left_label=f'{short_gap_sec}s < inter-call-interval <= {long_gap_sec}s',
-    interval_mid_label=f'{very_short_gap_sec}s < inter-call-interval <= {short_gap_sec}s',
-    interval_right_label=f'inter-call-interval <= {very_short_gap_sec}s',
-    inter_call_gaps=gaps_all,
-    self_ici_gaps_by_type=self_ici_gaps_all,
-    self_ici_call_types=self_ici_call_types,
-    shared_log_count_max=shared_log_count_max,
-    call_type_order=effective_call_type_order,
-    file_tag_left=tag_all_left,
-    file_tag_mid=tag_all_mid,
-    file_tag_right=tag_all_right
-)
-plot_transition_matrices(
-    output_folder, output_folder, output_folder,
-    save_name='transition_matrices_daytime.png',
-    plot_note=plot_note_day,
-    interval_left=long_gap_sec,
-    interval_mid=short_gap_sec,
-    interval_right=very_short_gap_sec,
-    interval_left_label=f'{short_gap_sec}s < inter-call-interval <= {long_gap_sec}s',
-    interval_mid_label=f'{very_short_gap_sec}s < inter-call-interval <= {short_gap_sec}s',
-    interval_right_label=f'inter-call-interval <= {very_short_gap_sec}s',
-    inter_call_gaps=gaps_day,
-    self_ici_gaps_by_type=self_ici_gaps_day,
-    self_ici_call_types=self_ici_call_types,
-    shared_log_count_max=shared_log_count_max,
-    call_type_order=effective_call_type_order,
-    file_tag_left=tag_day_left,
-    file_tag_mid=tag_day_mid,
-    file_tag_right=tag_day_right
-)
-plot_transition_matrices(
-    output_folder, output_folder, output_folder,
-    save_name='transition_matrices_nighttime.png',
-    plot_note=plot_note_night,
-    interval_left=long_gap_sec,
-    interval_mid=short_gap_sec,
-    interval_right=very_short_gap_sec,
-    interval_left_label=f'{short_gap_sec}s < inter-call-interval <= {long_gap_sec}s',
-    interval_mid_label=f'{very_short_gap_sec}s < inter-call-interval <= {short_gap_sec}s',
-    interval_right_label=f'inter-call-interval <= {very_short_gap_sec}s',
-    inter_call_gaps=gaps_night,
-    self_ici_gaps_by_type=self_ici_gaps_night,
-    self_ici_call_types=self_ici_call_types,
-    shared_log_count_max=shared_log_count_max,
-    call_type_order=effective_call_type_order,
-    file_tag_left=tag_night_left,
-    file_tag_mid=tag_night_mid,
-    file_tag_right=tag_night_right
-)

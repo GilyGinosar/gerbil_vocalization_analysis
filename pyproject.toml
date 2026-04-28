@@ -15,6 +15,10 @@ dependencies = [
     "tqdm>=4.67.1",
 ]
 
+[project.scripts]
+gerbil-average-audio = "vocalization_analysis.pipelines.average_audio:main"
+gerbil-rms-assignment = "vocalization_analysis.pipelines.rms_assignment:main"
+
 [dependency-groups]
 dev = [
     "ipykernel>=7.2.0",

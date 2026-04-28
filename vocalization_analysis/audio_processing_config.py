@@ -13,7 +13,7 @@ def get_experiment_month(exp: int) -> str:
         return "2025_07"
     if 332 <= exp <= 344:
         return "2025_10"
-    if exp >= 491:
+    if 492 <= exp <= 567 :
         return "2026_02"
     raise ValueError(f"Unknown experiment range for {exp}")
 
