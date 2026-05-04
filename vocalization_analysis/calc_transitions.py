@@ -69,17 +69,38 @@ def _effective_call_type_order(base_order, call_group_map):
     return order
 
 
-def collect_inter_call_gaps(csv_files):
-    if isinstance(csv_files, str):
-        csv_paths = [csv_files]
-    else:
-        csv_paths = list(csv_files)
+def _coerce_dfs(csv_files_or_dfs):
+    """Normalize input to a list of DataFrames each tagged with `_source_exp`.
 
-    gaps = []
+    Accepts:
+      - str path to one CSV
+      - list/tuple of CSV paths
+      - dict[source_name, DataFrame] for the in-memory path
+    """
+    if isinstance(csv_files_or_dfs, dict):
+        out = []
+        for source_name, df in csv_files_or_dfs.items():
+            d = df.copy()
+            d['_source_exp'] = str(source_name)
+            out.append(d)
+        return out
+    if isinstance(csv_files_or_dfs, str):
+        csv_paths = [csv_files_or_dfs]
+    else:
+        csv_paths = list(csv_files_or_dfs)
+    out = []
     for csv_path in csv_paths:
         source_name = os.path.basename(os.path.dirname(csv_path)) or os.path.basename(csv_path)
         df = pd.read_csv(csv_path)
         df['_source_exp'] = source_name
+        out.append(df)
+    return out
+
+
+def collect_inter_call_gaps(csv_files_or_dfs):
+    dfs = _coerce_dfs(csv_files_or_dfs)
+    gaps = []
+    for df in dfs:
         df = df.dropna(subset=['event_type', 'start_time_experiment_sec', 'stop_time_experiment_sec']).copy()
         df = df[df['event_type'] != 'noise']
         if df.empty:
@@ -94,18 +115,11 @@ def collect_inter_call_gaps(csv_files):
     return np.array(gaps, dtype=float)
 
 
-def collect_self_inter_call_gaps(csv_files, target_call_type, call_group_map=None):
-    if isinstance(csv_files, str):
-        csv_paths = [csv_files]
-    else:
-        csv_paths = list(csv_files)
-
+def collect_self_inter_call_gaps(csv_files_or_dfs, target_call_type, call_group_map=None):
+    dfs = _coerce_dfs(csv_files_or_dfs)
     target = str(target_call_type).strip().lower()
     gaps = []
-    for csv_path in csv_paths:
-        source_name = os.path.basename(os.path.dirname(csv_path)) or os.path.basename(csv_path)
-        df = pd.read_csv(csv_path)
-        df['_source_exp'] = source_name
+    for df in dfs:
         df = df.dropna(subset=['event_type', 'start_time_experiment_sec', 'stop_time_experiment_sec']).copy()
         df['event_type'] = df['event_type'].map(_canonicalize_call_type)
         if call_group_map:
@@ -214,6 +228,105 @@ def compute_shared_log_count_max(output_dirs, arena_names=('arena', 'underground
     return shared_max
 
 
+def compute_arena_transitions(
+    csv_files_or_dfs,
+    inter_call_interval_sec,
+    min_inter_call_interval_sec=None,
+    call_group_map=None,
+    call_type_order=None,
+):
+    """In-memory transition-matrix computation. No disk I/O.
+
+    Returns:
+        {arena_name: {'counts': DataFrame, 'call_counts': Series, 'probabilities': DataFrame}}
+        with arena_name in {'arena', 'underground'}.
+
+    Notes:
+    - `csv_files_or_dfs` can be a single path, a list of paths, or a
+      dict[source_name, DataFrame] (see `_coerce_dfs`).
+    - Transitions are computed within each source independently
+      (no transitions are counted across experiments).
+    - Day/night filtering must be applied upstream by the caller; this function
+      does not look at clock time.
+    """
+    channel_map = {10: 'arena_1', 20: 'arena_2', 30: 'underground'}
+    output_groups = {'arena': [10, 20], 'underground': [30]}
+
+    dfs = _coerce_dfs(csv_files_or_dfs)
+    if not dfs:
+        raise ValueError("No input data provided.")
+    df = pd.concat(dfs, ignore_index=True)
+
+    df = df.dropna(subset=['event_type', 'start_time_experiment_sec']).copy()
+    df['event_type'] = df['event_type'].map(_canonicalize_call_type)
+    if call_group_map:
+        df['event_type'] = df['event_type'].map(lambda x: call_group_map.get(x, x))
+    df = df[df['event_type'] != 'noise']
+    if call_type_order is None:
+        call_type_order = _effective_call_type_order(CALL_TYPE_ORDER, call_group_map or {})
+    df = df[df['event_type'].isin(call_type_order)]
+    if df.empty:
+        raise ValueError("No rows remain after cleaning input.")
+
+    all_call_types = list(call_type_order)
+
+    channel_matrices = {}
+    channel_call_counts = {}
+    for channel_id in channel_map:
+        arena_data = df[df['channel'] == channel_id].copy()
+        matrix = pd.DataFrame(0, index=all_call_types, columns=all_call_types)
+        for _, exp_data in arena_data.groupby('_source_exp'):
+            rows = exp_data.sort_values('start_time_experiment_sec').to_dict('records')
+            for i in range(len(rows) - 1):
+                curr, nxt = rows[i], rows[i + 1]
+                gap = nxt['start_time_experiment_sec'] - curr['stop_time_experiment_sec']
+                if min_inter_call_interval_sec is not None:
+                    lower_ok = gap > min_inter_call_interval_sec
+                else:
+                    lower_ok = gap >= 0   # reject overlapping calls (negative gap)
+                if lower_ok and gap <= inter_call_interval_sec:
+                    matrix.loc[curr['event_type'], nxt['event_type']] += 1
+        channel_matrices[channel_id] = matrix
+        channel_call_counts[channel_id] = (
+            arena_data['event_type']
+            .value_counts()
+            .reindex(all_call_types, fill_value=0)
+            .astype(int)
+        )
+
+    results = {}
+    for output_name, channel_ids in output_groups.items():
+        combined = pd.DataFrame(0, index=all_call_types, columns=all_call_types)
+        combined_call_counts = pd.Series(0, index=all_call_types, dtype=int)
+        for channel_id in channel_ids:
+            combined = combined.add(channel_matrices[channel_id], fill_value=0)
+            combined_call_counts = combined_call_counts.add(channel_call_counts[channel_id], fill_value=0)
+        combined = combined.astype(int)
+        combined_call_counts = combined_call_counts.astype(int)
+        prob_matrix = combined.div(combined.sum(axis=1), axis=0).fillna(0)
+        results[output_name] = {
+            'counts': combined,
+            'call_counts': combined_call_counts,
+            'probabilities': prob_matrix,
+        }
+    return results
+
+
+def save_arena_transitions(arena_matrices, output_dir, file_tag=''):
+    """Persist the dict returned by `compute_arena_transitions` to CSVs."""
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    tag_part = f"_{file_tag}" if file_tag else ""
+    for arena_name, m in arena_matrices.items():
+        m['counts'].to_csv(os.path.join(output_dir, f'counts_{arena_name}{tag_part}.csv'))
+        m['call_counts'].rename('n_calls').to_csv(
+            os.path.join(output_dir, f'call_counts_{arena_name}{tag_part}.csv'), header=True
+        )
+        m['probabilities'].to_csv(
+            os.path.join(output_dir, f'probabilities_{arena_name}{tag_part}.csv')
+        )
+
+
 def compute_and_save_arena_transitions(
     csv_files,
     inter_call_interval_sec,
@@ -223,119 +336,22 @@ def compute_and_save_arena_transitions(
     call_type_order=None,
     file_tag=''
 ):
+    """Backward-compatible wrapper: compute matrices then write CSVs to disk.
+
+    Used by scripts/run_transitions.py (cluster). Identical inputs/outputs as
+    before; internally it just delegates to compute_arena_transitions +
+    save_arena_transitions.
     """
-    Parses one or more consolidated CSVs by channel, computes transitions,
-    and saves results to a specified directory.
-
-    Notes:
-    - `csv_files` can be a single path or a list of paths.
-    - Transitions are computed within each source CSV independently
-      (no transitions are counted across experiments).
-    - Day/night filtering must be applied upstream by the caller; this function
-      does not look at clock time.
-    """
-    # 1. Create output directory if it doesn't exist
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-        print(f"Created directory: {output_dir}")
-
-    # Channel mapping and output grouping
-    channel_map = {10: 'arena_1', 20: 'arena_2', 30: 'underground'}
-    output_groups = {'arena': [10, 20], 'underground': [30]}
-
     try:
-        if isinstance(csv_files, str):
-            csv_paths = [csv_files]
-        else:
-            csv_paths = list(csv_files)
-
-        if not csv_paths:
-            raise ValueError("No CSV files provided.")
-
-        all_dfs = []
-        for csv_path in csv_paths:
-            source_name = os.path.basename(os.path.dirname(csv_path)) or os.path.basename(csv_path)
-            src_df = pd.read_csv(csv_path)
-            src_df['_source_exp'] = source_name
-            all_dfs.append(src_df)
-
-        df = pd.concat(all_dfs, ignore_index=True)
-
-        # 2. Cleaning: drop missing events, canonicalize labels, drop 'noise'.
-        df = df.dropna(subset=['event_type', 'start_time_experiment_sec']).copy()
-        df['event_type'] = df['event_type'].map(_canonicalize_call_type)
-        if call_group_map:
-            df['event_type'] = df['event_type'].map(lambda x: call_group_map.get(x, x))
-        df = df[df['event_type'] != 'noise']
-        if call_type_order is None:
-            call_type_order = _effective_call_type_order(CALL_TYPE_ORDER, call_group_map or {})
-        df = df[df['event_type'].isin(call_type_order)]
-        if df.empty:
-            raise ValueError("No rows remain after cleaning input.")
-
-        # Use fixed call-type order for all outputs, even if some are absent.
-        all_call_types = list(call_type_order)
-
-        # 4. Compute per-channel transition matrices first
-        channel_matrices = {}
-        channel_call_counts = {}
-        for channel_id, arena_name in channel_map.items():
-            # Filter for this channel across all source CSVs
-            arena_data = df[df['channel'] == channel_id].copy()
-
-            # Initialize empty count matrix
-            matrix = pd.DataFrame(0, index=all_call_types, columns=all_call_types)
-
-            # 5. Compute transitions within each source experiment only
-            for _, exp_data in arena_data.groupby('_source_exp'):
-                rows = exp_data.sort_values('start_time_experiment_sec').to_dict('records')
-                for i in range(len(rows) - 1):
-                    curr, nxt = rows[i], rows[i + 1]
-
-                    # Gap between end of current and start of next
-                    gap = nxt['start_time_experiment_sec'] - curr['stop_time_experiment_sec']
-
-                    if min_inter_call_interval_sec is not None:
-                        lower_ok = gap > min_inter_call_interval_sec
-                    else:
-                        lower_ok = gap >= 0   # reject overlapping calls (negative gap)
-                    if lower_ok and gap <= inter_call_interval_sec:
-                        matrix.loc[curr['event_type'], nxt['event_type']] += 1
-
-            channel_matrices[channel_id] = matrix
-            channel_call_counts[channel_id] = (
-                arena_data['event_type']
-                .value_counts()
-                .reindex(all_call_types, fill_value=0)
-                .astype(int)
-            )
-
-        # 6. Combine and save requested outputs
-        tag_part = f"_{file_tag}" if file_tag else ""
-        for output_name, channel_ids in output_groups.items():
-            combined = pd.DataFrame(0, index=all_call_types, columns=all_call_types)
-            combined_call_counts = pd.Series(0, index=all_call_types, dtype=int)
-            for channel_id in channel_ids:
-                combined = combined.add(channel_matrices[channel_id], fill_value=0)
-                combined_call_counts = combined_call_counts.add(channel_call_counts[channel_id], fill_value=0)
-            combined = combined.astype(int)
-            combined_call_counts = combined_call_counts.astype(int)
-
-            # Save raw counts
-            count_path = os.path.join(output_dir, f'counts_{output_name}{tag_part}.csv')
-            combined.to_csv(count_path)
-
-            # Save per-call-type totals
-            calls_path = os.path.join(output_dir, f'call_counts_{output_name}{tag_part}.csv')
-            combined_call_counts.rename('n_calls').to_csv(calls_path, header=True)
-
-            # Save probabilities (row-normalized)
-            prob_matrix = combined.div(combined.sum(axis=1), axis=0).fillna(0)
-            prob_path = os.path.join(output_dir, f'probabilities_{output_name}{tag_part}.csv')
-            prob_matrix.to_csv(prob_path)
-
+        results = compute_arena_transitions(
+            csv_files,
+            inter_call_interval_sec=inter_call_interval_sec,
+            min_inter_call_interval_sec=min_inter_call_interval_sec,
+            call_group_map=call_group_map,
+            call_type_order=call_type_order,
+        )
+        save_arena_transitions(results, output_dir, file_tag=file_tag)
         print(f"Success! Transition matrices saved in: {os.path.abspath(output_dir)}")
-
     except Exception as e:
         print(f"An error occurred: {e}")
 
@@ -369,7 +385,15 @@ def plot_transition_matrices(
     file_tag_mid='',
     file_tag_right='',
     figure_title=None,
+    matrices_left=None,
+    matrices_mid=None,
+    matrices_right=None,
 ):
+    """If `matrices_left` / `matrices_mid` / `matrices_right` are provided
+    (each a dict[arena → {'counts': DF, 'call_counts': Series,
+    'probabilities': DF}]), they are used directly and the corresponding
+    output_dir/file_tag arguments are ignored for those bands. Otherwise
+    matrices are read from disk using the file_tag_* prefixes."""
     """
     Row 1: call proportions (2 panels, unchanged style).
     Row 2: transition counts (6 panels: 3 interval groups x arena/underground).
@@ -471,15 +495,32 @@ def plot_transition_matrices(
         tag_left = f"_{file_tag_left}" if file_tag_left else ""
         tag_mid = f"_{file_tag_mid}" if file_tag_mid else ""
         tag_right = f"_{file_tag_right}" if file_tag_right else ""
-        call_count_series[arena] = pd.read_csv(
-            os.path.join(output_dir_left, f'call_counts_{arena}{tag_left}.csv'), index_col=0
-        )['n_calls']
-        count_left[arena] = pd.read_csv(os.path.join(output_dir_left, f'counts_{arena}{tag_left}.csv'), index_col=0)
-        prob_left[arena] = pd.read_csv(os.path.join(output_dir_left, f'probabilities_{arena}{tag_left}.csv'), index_col=0)
-        count_mid[arena] = pd.read_csv(os.path.join(output_dir_mid, f'counts_{arena}{tag_mid}.csv'), index_col=0)
-        prob_mid[arena] = pd.read_csv(os.path.join(output_dir_mid, f'probabilities_{arena}{tag_mid}.csv'), index_col=0)
-        count_right[arena] = pd.read_csv(os.path.join(output_dir_right, f'counts_{arena}{tag_right}.csv'), index_col=0)
-        prob_right[arena] = pd.read_csv(os.path.join(output_dir_right, f'probabilities_{arena}{tag_right}.csv'), index_col=0)
+
+        if matrices_left is not None:
+            count_left[arena] = matrices_left[arena]['counts']
+            prob_left[arena] = matrices_left[arena]['probabilities']
+            call_count_series[arena] = matrices_left[arena]['call_counts']
+        else:
+            count_left[arena] = pd.read_csv(os.path.join(output_dir_left, f'counts_{arena}{tag_left}.csv'), index_col=0)
+            prob_left[arena] = pd.read_csv(os.path.join(output_dir_left, f'probabilities_{arena}{tag_left}.csv'), index_col=0)
+            call_count_series[arena] = pd.read_csv(
+                os.path.join(output_dir_left, f'call_counts_{arena}{tag_left}.csv'), index_col=0
+            )['n_calls']
+
+        if matrices_mid is not None:
+            count_mid[arena] = matrices_mid[arena]['counts']
+            prob_mid[arena] = matrices_mid[arena]['probabilities']
+        else:
+            count_mid[arena] = pd.read_csv(os.path.join(output_dir_mid, f'counts_{arena}{tag_mid}.csv'), index_col=0)
+            prob_mid[arena] = pd.read_csv(os.path.join(output_dir_mid, f'probabilities_{arena}{tag_mid}.csv'), index_col=0)
+
+        if matrices_right is not None:
+            count_right[arena] = matrices_right[arena]['counts']
+            prob_right[arena] = matrices_right[arena]['probabilities']
+        else:
+            count_right[arena] = pd.read_csv(os.path.join(output_dir_right, f'counts_{arena}{tag_right}.csv'), index_col=0)
+            prob_right[arena] = pd.read_csv(os.path.join(output_dir_right, f'probabilities_{arena}{tag_right}.csv'), index_col=0)
+
         global_log_count_max = max(global_log_count_max, np.log1p(count_left[arena].values).max())
         global_log_count_max = max(global_log_count_max, np.log1p(count_mid[arena].values).max())
         global_log_count_max = max(global_log_count_max, np.log1p(count_right[arena].values).max())
@@ -553,7 +594,9 @@ def plot_transition_matrices(
             hist_ax.set_xscale('log')
             xmin = float(bins[0])
             xmax = float(bins[-1])
-            hist_ax.set_xlim(xmin, xmax)
+            # Widen slightly so a threshold line at the data-min isn't hidden
+            # behind the left spine.
+            hist_ax.set_xlim(xmin * 0.85, xmax)
         else:
             hist_ax.hist(inter_call_gaps, bins=30, color='#6C757D', edgecolor='white', linewidth=0.4)
 
@@ -599,7 +642,9 @@ def plot_transition_matrices(
         if len(zoom_data) > 0:
             zoom_ax.hist(zoom_data, bins=zoom_bins, color='#ADB5BD', edgecolor='white', linewidth=0.4)
         zoom_ax.set_xscale('log')
-        zoom_ax.set_xlim(zoom_min, zoom_max)
+        # Widen slightly so a threshold line at zoom_min (e.g. very-short gap)
+        # is visible inside the plot rather than on the spine.
+        zoom_ax.set_xlim(zoom_min * 0.85, zoom_max)
         if hist_zoom_ymax is not None and hist_zoom_ymax > 0:
             zoom_ax.set_ylim(0, hist_zoom_ymax * 1.05)
         zoom_ticks = [0.05, 0.1, 0.3, 0.5, 1.0, 2.0, 3.0]
@@ -633,7 +678,7 @@ def plot_transition_matrices(
         if len(zoom_data) > 0:
             ax.hist(zoom_data, bins=zoom_bins, color='#CED4DA', edgecolor='white', linewidth=0.4)
         ax.set_xscale('log')
-        ax.set_xlim(zoom_min, zoom_max)
+        ax.set_xlim(zoom_min * 0.85, zoom_max)
         if self_ici_ymax_by_type is not None:
             shared_y = self_ici_ymax_by_type.get(call_type, 0)
             if shared_y > 0:
@@ -842,6 +887,16 @@ def plot_transition_matrices(
     left_txt = interval_left_label or (f'{interval_left}sec inter-call-interval' if interval_left is not None else 'inter-call-interval')
     mid_txt = interval_mid_label or (f'{interval_mid}sec inter-call-interval' if interval_mid is not None else 'inter-call-interval')
     right_txt = interval_right_label or (f'{interval_right}sec inter-call-interval' if interval_right is not None else 'inter-call-interval')
+
+    # Total transitions per band (summed across arenas) — shown above each section.
+    band_totals = {
+        'left':  sum(int(count_left[a].values.sum())  for a in arena_names),
+        'mid':   sum(int(count_mid[a].values.sum())   for a in arena_names),
+        'right': sum(int(count_right[a].values.sum()) for a in arena_names),
+    }
+    left_txt  = f"{left_txt}  (n_transitions = {band_totals['left']:,})"
+    mid_txt   = f"{mid_txt}  (n_transitions = {band_totals['mid']:,})"
+    right_txt = f"{right_txt}  (n_transitions = {band_totals['right']:,})"
     fig.text(c_left_cx, r1_top + 0.08 * r1_h, left_txt, ha='center', va='center', fontsize=10)
     fig.text(c_mid_cx, r1_top + 0.08 * r1_h, mid_txt, ha='center', va='center', fontsize=10)
     fig.text(c_right_cx, r1_top + 0.08 * r1_h, right_txt, ha='center', va='center', fontsize=10)
@@ -856,6 +911,9 @@ def plot_transition_matrices(
     if plot_note:
         fig.text(0.5, 0.972, plot_note, ha='center', va='top', fontsize=10)
     plot_path = os.path.join(output_dir_left, save_name)
-    fig.savefig(plot_path, dpi=200, bbox_inches='tight')
-    plt.show()
+    fig.savefig(plot_path, dpi=200, bbox_inches='tight', pad_inches=1.5)
+    pdf_path = os.path.splitext(plot_path)[0] + '.pdf'
+    fig.savefig(pdf_path, bbox_inches='tight', pad_inches=1.5)
+    plt.close(fig)
     print(f"Saved plot to: {os.path.abspath(plot_path)}")
+    print(f"Saved plot to: {os.path.abspath(pdf_path)}")
