@@ -14,11 +14,15 @@ dependencies = [
     "scikit-image>=0.26.0",
     "scipy>=1.16.3",
     "tqdm>=4.67.1",
+    "vocalpy==0.9.3",
 ]
 
 [project.scripts]
 gerbil-average-audio = "vocalization_analysis.pipelines.average_audio:main"
 gerbil-rms-assignment = "vocalization_analysis.pipelines.rms_assignment:main"
+
+[tool.setuptools.packages.find]
+include = ["vocalization_analysis*"]
 
 [dependency-groups]
 dev = [
