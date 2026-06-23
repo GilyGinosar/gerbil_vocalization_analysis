@@ -15,7 +15,7 @@ import platform
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -26,10 +26,11 @@ from vocalization_analysis.pipelines.rms_assignment import (
     load_per_file_calls,
     sort_calls_by_time,
 )
+from vocalization_analysis.sync_times import attach_experiment_time, sync_csv_path
 
 # === Edit these before running ============================================
-#EXPERIMENT_IDS = [97,98,99] # explicit list
-EXPERIMENT_IDS = list(range(112,113))     # inclusive 530..540
+EXPERIMENT_IDS = [530] # explicit list
+#EXPERIMENT_IDS = list(range(518))     # inclusive 530..540
 
 
 
@@ -102,6 +103,23 @@ def combine_for_experiment(exp: int) -> Path:
     for col in ("mean_entropy", "mean_entropy_norm"):
         if col in combined_df.columns:
             qmc_df[col] = combined_df[col].values
+
+    # Align calls onto a single experiment timeline using sync.csv.
+    # Adds time_from_exp_start_sec (offset from first chunk's start) and
+    # wall_clock_dt (absolute datetime). NaN/NaT for any file_num missing from
+    # sync.csv. Skipped with a warning if sync.csv is absent.
+    sync_path = sync_csv_path(exp)
+    if sync_path.exists():
+        qmc_df = attach_experiment_time(qmc_df, exp)
+        # Place the new time columns right after stop_time_file_sec, so all
+        # timing columns sit together.
+        new_time_cols = [c for c in ("time_from_exp_start_sec", "wall_clock_dt") if c in qmc_df.columns]
+        if new_time_cols and "stop_time_file_sec" in qmc_df.columns:
+            rest = [c for c in qmc_df.columns if c not in new_time_cols]
+            insert_at = rest.index("stop_time_file_sec") + 1
+            qmc_df = qmc_df[rest[:insert_at] + new_time_cols + rest[insert_at:]]
+    else:
+        print(f"Warning: sync.csv not found at {sync_path}; skipping experiment-time columns.")
 
     out_path = exp_audio_dir / "calls.csv"
     qmc_df.to_csv(out_path, index=False)

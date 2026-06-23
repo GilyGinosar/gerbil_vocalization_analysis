@@ -14,11 +14,11 @@ from pathlib import Path
 
 import pandas as pd
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
-if str(REPO_ROOT / "scripts") not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+if str(REPO_ROOT / "scripts" / "analysis") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "scripts" / "analysis"))
 
 from run_transitions import (  # type: ignore
     BASE_PROCESSED,

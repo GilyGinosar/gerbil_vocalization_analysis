@@ -18,6 +18,7 @@ from vocalization_analysis.audio_processing_config import (
     get_experiment_month,
     should_skip_experiment,
 )
+from vocalization_analysis.sync_times import write_file_times
 
 if platform.system() == "Windows":
     BASE_RAW = Path(r"\\sanesstorage.cns.nyu.edu\archive\ginosar\Raw_data")
@@ -235,6 +236,8 @@ def process_experiment(exp: int) -> dict[str, object]:
     print("Processed experiment folder:", paths["audio"])
 
     start_time_experiment, sync_df = load_sync_file(exp, paths["sync"])
+    file_times_path = write_file_times(exp, paths["audio"], base_raw=BASE_RAW)
+    print(f"Wrote tidy sync file_times to: {file_times_path}")
     log_copy_path = copy_experiment_log_file(exp, paths["experiment_root"], paths["audio"])
     summary = average_microphone_pairs(exp, paths["raw_wavs"], paths["averaged_wavs"])
 
@@ -243,6 +246,7 @@ def process_experiment(exp: int) -> dict[str, object]:
         "month_folder": paths["month_folder"],
         "start_time_experiment": str(start_time_experiment),
         "sync_rows": len(sync_df),
+        "file_times_csv": str(file_times_path),
         "copied_log_file": None if log_copy_path is None else str(log_copy_path),
         **summary,
     }

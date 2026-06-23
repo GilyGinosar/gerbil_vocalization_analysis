@@ -209,3 +209,6 @@ __marimo__/
 
 # Local QC figures (not committed)
 figures/
+
+# Local data / rendered media (not committed)
+videos/

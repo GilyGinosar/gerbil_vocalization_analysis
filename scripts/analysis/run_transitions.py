@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -46,7 +46,7 @@ from vocalization_analysis.calc_transitions import (
 # One or more date folders to process. Experiments are auto-discovered from
 # every integer-named sub-folder of each <BASE_PROCESSED>/<date_folder>/.
 # A single run pools experiments across all listed date folders.
-DATE_FOLDERS = ["2025_10"]                     # e.g. ["2025_07"] or ["2025_07", "2025_10", "2026_02"]
+DATE_FOLDERS = ["2025_07"]                     # e.g. ["2025_07"] or ["2025_07", "2025_10", "2026_02"]
 
 # Daytime window. Half-open: [LIGHT_START_HOUR, LIGHT_END_HOUR).
 # Wraps midnight if LIGHT_START_HOUR > LIGHT_END_HOUR (e.g. 20 -> 8).
@@ -54,12 +54,12 @@ LIGHT_START_HOUR = 8
 LIGHT_END_HOUR   = 20
 
 # Inter-call interval bands (seconds).
-VERY_SHORT_GAP_SEC = 0.05
+VERY_SHORT_GAP_SEC = 0.035
 SHORT_GAP_SEC      = 2
 LONG_GAP_SEC       = 300
 
 # Call-type order along matrix rows/cols. Matches what current DAS models emit.
-CALL_TYPE_ORDER = ['newborn', 'high-freq', 'warble', 'alarm', 'stacks']
+CALL_TYPE_ORDER = ['high-freq', 'warble', 'alarm', 'stacks']
 
 # Optional ad-hoc grouping, e.g. {'dense-stack': 'stacks'}. Empty = no grouping.
 CALL_GROUP_MAP: dict[str, str] = {}
@@ -70,7 +70,7 @@ SELF_ICI_CALL_TYPES = ['high-freq', 'warble', 'alarm', 'stacks']
 # Output goes to <BASE_PROCESSED>/<OUTPUT_FOLDER_NAME>/<dates_tag>/, where
 # <dates_tag> = "_".join(DATE_FOLDERS). Each (date-folder combination) gets
 # its own sub-folder, so different runs don't collide.
-OUTPUT_FOLDER_NAME = "combined_transitions_outputs"
+OUTPUT_FOLDER_NAME = "transitions_2026_05_25"
 # ==========================================================================
 
 
