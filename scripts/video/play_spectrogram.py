@@ -263,6 +263,8 @@ def main() -> int:
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
                 "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-b:a", "128k",
+                "-movflags", "+faststart",   # moov atom up front: streamable,
+                                             # and a truncated copy stays usable
                 str(out)]
 
         res = _run(cmd)

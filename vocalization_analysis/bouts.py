@@ -63,6 +63,7 @@ BOUT_THRESHOLDS: dict[str, dict[str, float | int | None]] = {
     "warble":    dict(min_icg_s=0.05, max_icg_s=0.20, min_bout_size=5),
     "high-freq": dict(min_icg_s=0.05, max_icg_s=0.20, min_bout_size=5),
     "alarm":     dict(min_icg_s=None, max_icg_s=2.0,  min_bout_size=5),
+    "stacks":    dict(min_icg_s=None, max_icg_s=2.0,  min_bout_size=5),
 }
 
 # Multi-scale config for alarm calls. The "bout" scale uses the same
