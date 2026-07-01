@@ -22,6 +22,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 from pathlib import Path
 
@@ -42,14 +43,16 @@ for p in (REPO_ROOT, REPO_ROOT / "scripts" / "utils", REPO_ROOT / "scripts" / "a
 from light_cycle import get_light_cycle_for_month  # noqa: E402
 from ethogram_io import (  # noqa: E402
     BASE_PROCESSED, CALL_TYPE_ORDER, EVENTS_BY_DATE, LOCATION_GROUPS, ROW_START_HOUR,
-    counts_grid, coverage_grid, day_axis, load_all_calls,
+    counts_grid, coverage_grid, day_axis, list_experiment_dirs, load_all_calls,
 )
+
+EXPORTS_DIR = REPO_ROOT / "exports"     # also drop every saved figure here for easy download
 
 # Date folder(s) to run on — EDIT HERE to switch experiment (e.g. ["2025_10"]).
 # Available: 2024_12, 2025_03, 2025_07, 2025_10, 2026_02. Overridable with --dates.
-DEFAULT_DATES = ["2025_03"]
-BIN_MINUTES = 5
-THRESHOLD = 0.2                 # min per-type-normalised rate to paint a cell
+DEFAULT_DATES = ["2025_07"]
+BIN_MINUTES = 1
+THRESHOLD = 0.1                 # min per-type-normalised rate to paint a cell
 PCT = 99.0                      # percentile used as each call type's scale
 CALL_COLORS = {                 # one distinct color per call type
     "alarm": "#e41a1c",
@@ -61,14 +64,47 @@ CALL_COLORS = {                 # one distinct color per call type
 QUIET_DAY = (1.0, 0.988, 0.816)     # #fff6d0-ish (light hours, quiet)
 QUIET_NIGHT = (0.90, 0.90, 0.90)    # dark hours, quiet
 NO_REC = (0.74, 0.74, 0.74)         # no recording
+FILE_TICK_FONTSIZE = 2.5            # font for the [exp,file] labels above each day's top row
 
 
 def _fmt_hour(t: float) -> str:
     return f"{int(round(t)) % 24:02d}:00"
 
 
+def load_file_starts(date_folder: str) -> pd.DataFrame:
+    """[exp, file_num, start] for every recorded file, from each exp's file_times.csv."""
+    rows = []
+    for exp_dir in list_experiment_dirs(date_folder):
+        ft = exp_dir / "file_times.csv"
+        if not ft.exists():
+            continue
+        t = pd.read_csv(ft)
+        start = pd.to_datetime(t["start_date"] + " " + t["start_time"])
+        for fn, st in zip(t["file_num"], start):
+            rows.append((int(exp_dir.name), int(fn), st))
+    return pd.DataFrame(rows, columns=["exp", "file_num", "start"])
+
+
+def _draw_file_ticks(ax, day_files, x0: int, fontsize: float = FILE_TICK_FONTSIZE) -> None:
+    """Thin ticks + rotated [exp,file] labels at the top edge of a day's top row.
+
+    ``day_files`` is the subset of ``load_file_starts()`` whose circadian day is this
+    row; lets you read off which experiment/file covers a feature in the ethogram.
+    """
+    trans = ax.get_xaxis_transform()       # x in data (hour), y in axes fraction
+    for r in day_files.itertuples():
+        t = r.start
+        ev_x = x0 + (((t.hour * 60 + t.minute) - x0 * 60) % 1440) / 60.0
+        ax.plot([ev_x, ev_x], [1.0, 1.04], transform=trans, color="0.4",
+                lw=0.3, clip_on=False, zorder=8)
+        ax.text(ev_x, 1.06, f"{r.exp},{r.file_num}", transform=trans, rotation=90,
+                fontsize=fontsize, va="bottom", ha="center", color="0.4",
+                clip_on=False, zorder=8)
+
+
 def plot_categorical(df, date_folder, day0, days, covered_min, call_types, bin_minutes,
-                     light_start, light_end, x0, threshold, dominance, out_path):
+                     light_start, light_end, x0, threshold, dominance, out_path,
+                     file_starts=None):
     groups = list(LOCATION_GROUPS.items())
     n_days, n_ct = len(days), len(call_types)
     n_hourbins = covered_min.shape[1]
@@ -122,6 +158,8 @@ def plot_categorical(df, date_folder, day0, days, covered_min, call_types, bin_m
         axs = subfigs[d].subplots(len(groups), 1, sharex=True, squeeze=False,
                                   gridspec_kw={"hspace": 0.0})[:, 0]
         axs[0].set_title(day_labels[d], loc="left", fontsize=9, pad=3)
+        if file_starts is not None:
+            _draw_file_ticks(axs[0], file_starts[file_starts["day_idx"] == d], x0)
         for gi, (gname, _locs) in enumerate(groups):
             ax = axs[gi]
             ax.imshow(strip_rgb(gname, d)[None, :, :], aspect="auto",
@@ -169,7 +207,7 @@ def plot_categorical(df, date_folder, day0, days, covered_min, call_types, bin_m
 
 
 def plot_per_type_threshold(df, date_folder, day0, days, covered_min, call_types, bin_minutes,
-                            light_start, light_end, x0, threshold, out_path):
+                            light_start, light_end, x0, threshold, out_path, file_starts=None):
     """Per-call-type rows (like the stacked heatmap) but binary-colored by threshold.
 
     Each call type keeps its own row; a cell is painted that type's color where its
@@ -221,6 +259,8 @@ def plot_per_type_threshold(df, date_folder, day0, days, covered_min, call_types
         axs = subfigs[d].subplots(len(groups), 1, sharex=True, squeeze=False,
                                   gridspec_kw={"hspace": 0.18})[:, 0]
         axs[0].set_title(day_labels[d], loc="left", fontsize=9, pad=3)
+        if file_starts is not None:
+            _draw_file_ticks(axs[0], file_starts[file_starts["day_idx"] == d], x0)
         for gi, (gname, _locs) in enumerate(groups):
             ax = axs[gi]
             ax.imshow(strip_img(gname, d), aspect="auto", extent=(x0, x0 + 24, n_ct, 0),
@@ -264,7 +304,7 @@ def plot_per_type_threshold(df, date_folder, day0, days, covered_min, call_types
     print(f"{date_folder}: wrote {out_path}")
 
 
-def run_for_date(date_folder, bin_minutes, out_dir, threshold, dominance, style, light_cycle=None):
+def run_for_date(date_folder, bin_minutes, out_dir, threshold, dominance, style, light_cycle=None, fmt="pdf"):
     df = load_all_calls(date_folder)
     present = [ct for ct in CALL_TYPE_ORDER if ct in set(df["event_type"])]
     call_types = present + sorted(set(df["event_type"]) - set(CALL_TYPE_ORDER))
@@ -275,14 +315,23 @@ def run_for_date(date_folder, bin_minutes, out_dir, threshold, dominance, style,
     day0, days = day_axis(df, x0)
     n_hourbins = (24 * 60) // bin_minutes
     covered_min = coverage_grid(date_folder, day0, len(days), n_hourbins, bin_minutes, x0)
+    file_starts = load_file_starts(date_folder)
+    file_starts["day_idx"] = (
+        (file_starts["start"] - pd.Timedelta(hours=x0)).dt.normalize() - day0
+    ).dt.days
     if style == "per-type":
-        out_path = out_dir / date_folder / f"ethogram_pertype_{date_folder}_{bin_minutes}min.png"
+        out_path = out_dir / date_folder / f"ethogram_pertype_{date_folder}_{bin_minutes}min.{fmt}"
         plot_per_type_threshold(df, date_folder, day0, days, covered_min, call_types,
-                                bin_minutes, light_start, light_end, x0, threshold, out_path)
+                                bin_minutes, light_start, light_end, x0, threshold, out_path,
+                                file_starts=file_starts)
     else:
-        out_path = out_dir / date_folder / f"ethogram_categorical_{dominance}_{date_folder}_{bin_minutes}min.png"
+        out_path = out_dir / date_folder / f"ethogram_categorical_{dominance}_{date_folder}_{bin_minutes}min.{fmt}"
         plot_categorical(df, date_folder, day0, days, covered_min, call_types,
-                         bin_minutes, light_start, light_end, x0, threshold, dominance, out_path)
+                         bin_minutes, light_start, light_end, x0, threshold, dominance, out_path,
+                         file_starts=file_starts)
+    EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(out_path, EXPORTS_DIR / out_path.name)
+    print(f"   + exports/{out_path.name}")
 
 
 def main() -> int:
@@ -299,12 +348,14 @@ def main() -> int:
     ap.add_argument("--threshold", type=float, default=THRESHOLD,
                     help="min metric to paint a cell (winner-raw: calls/min; else 0-1 fraction)")
     ap.add_argument("--out-dir", type=Path, default=BASE_PROCESSED / "ethograms")
+    ap.add_argument("--format", choices=["pdf", "png"], default="pdf",
+                    help="output format (pdf keeps the tiny per-file labels crisp when zoomed)")
     ap.add_argument("--light-cycle", type=int, nargs=2, metavar=("ON", "OFF"), default=None)
     args = ap.parse_args()
     light_cycle = tuple(args.light_cycle) if args.light_cycle else None
     for date_folder in args.dates:
         run_for_date(date_folder, args.bin_min, args.out_dir, args.threshold,
-                     args.dominance, args.style, light_cycle)
+                     args.dominance, args.style, light_cycle, fmt=args.format)
     return 0
 
 
