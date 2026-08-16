@@ -54,6 +54,11 @@ TAU_MARKER_LABELS = ["35 ms", "2 s", "300 s"]
 MIN_COUNT = 30                         # blank a bin with fewer transitions than this
 WILSON_Z = 1.0                         # error-bar half-width in sigmas (1.0 ~ 68%; 1.96 = 95% CI)
 EXPORTS_DIR = REPO_ROOT / "exports"    # also drop every saved figure here for easy download
+# Litter-birth boundary per family: (exp, file_num) of the first *after-litter* file.
+# A call is "before" if exp < e, or (exp == e and file_num < f); else "after". Each date
+# is a distinct family, so before/after is a within-family comparison. Verified to give a
+# temporally clean split (max before-time < min after-time) for all three families.
+LITTER_BOUNDARY = {"2025_07": (275, 132), "2025_10": (340, 53), "2026_02": (526, 45)}
 # ===========================================================================
 
 
@@ -103,31 +108,81 @@ def loc_split_pairs(events, type_order, group_cols, start_col, stop_col):
             for loc in ["arena", "underground"]}
 
 
-def plot_tau_curves_by_loc(pairs_by_loc, type_order, title, tau_bins=TAU_BINS, min_count=MIN_COUNT):
-    """Grid of tau curves: rows = location, cols = current type, lines = next type."""
-    rows = list(pairs_by_loc)
+def call_composition_by_loc(events, type_order):
+    """{loc -> base rate [n_next]} from raw call abundance n_Y / N (each call once).
+
+    A structure-free reference: the fraction of *all* calls in the location that
+    are each type, independent of any transition/pairing. Contrast with the
+    transition-derived marginal (fraction of pairs ending in Y), which is weighted
+    by the pairing and can drift from true abundance. Both the consecutive and the
+    all-pairs figure use this same line so their chance levels are identical.
+    """
+    ev = events[events["event_type"].isin(type_order)].assign(
+        _loc2=events["assigned_location"].map(LOC_GROUPS))
+    return {loc: (ev[ev["_loc2"] == loc]["event_type"].value_counts(normalize=True)
+                 .reindex(type_order, fill_value=0).to_numpy())
+            for loc in ["arena", "underground"]}
+
+
+def split_by_litter(calls, date):
+    """Split one family's calls into (before, after) litter birth by (exp, file_num).
+
+    Boundary comes from LITTER_BOUNDARY[date] = (e, f): a call is 'before' if its exp
+    is earlier, or same exp and an earlier file; otherwise 'after'. Returns two frames.
+    """
+    if date not in LITTER_BOUNDARY:
+        raise KeyError(f"no litter boundary defined for {date}; have {list(LITTER_BOUNDARY)}")
+    e, f = LITTER_BOUNDARY[date]
+    before = (calls["exp"] < e) | ((calls["exp"] == e) & (calls["file_num"] < f))
+    return calls[before].copy(), calls[~before].copy()
+
+
+def _counts_from_pairs(pairs, type_order, tau_bins):
+    """Bin consecutive transition pairs into a count cube for rendering.
+
+    Returns (counts, base):
+      counts[x, b, y] = number of transitions curr=type_order[x] -> next=type_order[y]
+                        whose gap tau falls in bin b.
+      base[y]         = marginal P(next = type_order[y]) over all pairs (the chance level).
+    """
+    P = pairs[pairs["tau_s"] > 0].copy()
+    base = (P["next_type"].value_counts(normalize=True)
+            .reindex(type_order, fill_value=0).to_numpy())
+    P["bin"] = np.digitize(P["tau_s"].to_numpy(), tau_bins) - 1
+    P = P[(P["bin"] >= 0) & (P["bin"] < len(tau_bins) - 1)]
+    counts = np.zeros((len(type_order), len(tau_bins) - 1, len(type_order)))
+    for x, X in enumerate(type_order):
+        sub = P[P["curr_type"] == X]
+        for y, Y in enumerate(type_order):
+            s = sub[sub["next_type"] == Y].groupby("bin").size()
+            counts[x, s.index.to_numpy(), y] = s.to_numpy()
+    return counts, base
+
+
+def render_grid_from_counts(counts_by_loc, base_by_loc, type_order, title,
+                            tau_bins=TAU_BINS, min_count=MIN_COUNT,
+                            ylabel_stat="P(next | current, tau)", xlabel="gap tau (s)"):
+    """Grid of tau curves from precomputed count cubes.
+
+    counts_by_loc[loc] : array [n_curr, n_bins, n_next] (see _counts_from_pairs).
+    base_by_loc[loc]   : array [n_next], the dashed chance level per next-type.
+    Rows = location, cols = current type, lines = next type. Shared by the
+    consecutive-transition figure and the all-pairs sibling so both look identical.
+    """
+    rows = list(counts_by_loc)
     centers = np.sqrt(tau_bins[:-1] * tau_bins[1:])
     fig, axes = plt.subplots(len(rows), len(type_order),
                              figsize=(3.3 * len(type_order), 3.0 * len(rows)),
                              sharex=True, sharey=True, squeeze=False)
     for r, loc in enumerate(rows):
-        P = pairs_by_loc[loc]
-        P = P[P["tau_s"] > 0].copy()
-        # chance level = marginal P(next type) in this location (independent of current/tau);
-        # a curve only departs from its own dashed line where there is real dependence.
-        base = P["next_type"].value_counts(normalize=True).reindex(type_order, fill_value=0)
-        print(f"  chance ({loc}): " + ", ".join(f"{Y} {base[Y]:.3f}" for Y in type_order))
-        P["bin"] = np.digitize(P["tau_s"].to_numpy(), tau_bins) - 1
-        P = P[(P["bin"] >= 0) & (P["bin"] < len(tau_bins) - 1)]
+        base = base_by_loc[loc]
+        print(f"  chance ({loc}): "
+              + ", ".join(f"{Y} {base[y]:.3f}" for y, Y in enumerate(type_order)))
         for c, X in enumerate(type_order):
             ax = axes[r, c]
-            for Y in type_order:                         # dashed per-type chance-level reference
-                ax.axhline(base[Y], color=TYPE_COLORS.get(Y), ls="--", lw=0.8, alpha=0.45, zorder=0)
-            sub = P[P["curr_type"] == X]
-            counts = np.zeros((len(centers), len(type_order)))
-            for j, Y in enumerate(type_order):
-                s = sub[sub["next_type"] == Y].groupby("bin").size()
-                counts[s.index.to_numpy(), j] = s.to_numpy()
+            for y, Y in enumerate(type_order):           # dashed per-type chance-level reference
+                ax.axhline(base[y], color=TYPE_COLORS.get(Y), ls="--", lw=0.8, alpha=0.45, zorder=0)
+            counts = counts_by_loc[loc][c]               # [n_bins, n_next] for current type X
             total = counts.sum(axis=1)
             n = total[:, None]
             with np.errstate(invalid="ignore", divide="ignore"):
@@ -160,9 +215,9 @@ def plot_tau_curves_by_loc(pairs_by_loc, type_order, title, tau_bins=TAU_BINS, m
                 ax.set_title(f"current = {X}", fontsize=10,
                              color=TYPE_COLORS.get(X), fontweight="bold")
             if c == 0:
-                ax.set_ylabel(f"{loc}\nP(next | current, tau)", fontsize=9)
+                ax.set_ylabel(f"{loc}\n{ylabel_stat}", fontsize=9)
             if r == len(rows) - 1:
-                ax.set_xlabel("gap tau (s)")
+                ax.set_xlabel(xlabel)
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
     axes[0, -1].legend(title="next type", fontsize=7, loc="upper right")
@@ -171,16 +226,103 @@ def plot_tau_curves_by_loc(pairs_by_loc, type_order, title, tau_bins=TAU_BINS, m
     return fig
 
 
-def run(dates, out_dir, fmt, min_count):
+def render_grid_overlay(periods, type_order, title, tau_bins=TAU_BINS, min_count=MIN_COUNT,
+                        ylabel_stat="P(next | current, tau)", xlabel="gap tau (s)"):
+    """Same grid as render_grid_from_counts, but OVERLAYS several periods per panel.
+
+    periods : list of dicts, each with
+        label          : legend text (e.g. 'before litter')
+        counts_by_loc  : {loc -> [n_curr, n_bins, n_next]}
+        base_by_loc    : {loc -> [n_next]}  (drawn as a faint per-type reference)
+        ls, mfc, alpha, lw : line style knobs distinguishing the period
+    Colour encodes next-type (as always); line style encodes period. Error bars are
+    dropped here -- with two periods x four next-types that is eight lines per panel,
+    and the per-period n is large enough that Wilson bars would be hairline anyway.
+    """
+    from matplotlib.lines import Line2D
+
+    rows = list(periods[0]["counts_by_loc"])
+    centers = np.sqrt(tau_bins[:-1] * tau_bins[1:])
+    fig, axes = plt.subplots(len(rows), len(type_order),
+                             figsize=(3.3 * len(type_order), 3.0 * len(rows)),
+                             sharex=True, sharey=True, squeeze=False)
+    for r, loc in enumerate(rows):
+        for c, X in enumerate(type_order):
+            ax = axes[r, c]
+            for per in periods:
+                base = per["base_by_loc"][loc]
+                for y, Y in enumerate(type_order):
+                    ax.axhline(base[y], color=TYPE_COLORS.get(Y), ls=per["ls"],
+                               lw=0.6, alpha=0.25, zorder=0)
+                counts = per["counts_by_loc"][loc][c]        # [n_bins, n_next]
+                total = counts.sum(axis=1)
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    prob = counts / total[:, None]
+                prob[total < min_count] = np.nan
+                for y, Y in enumerate(type_order):
+                    ax.plot(centers, prob[:, y], marker="o", ms=2.6, lw=per["lw"],
+                            ls=per["ls"], color=TYPE_COLORS.get(Y), alpha=per["alpha"],
+                            markerfacecolor=per["mfc"], markeredgecolor=TYPE_COLORS.get(Y))
+            for mx, mlab in zip(TAU_MARKERS, TAU_MARKER_LABELS):
+                ax.axvline(mx, color="gray", ls=":", lw=0.7)
+                ax.text(mx, 0.985, mlab, transform=ax.get_xaxis_transform(),
+                        ha="center", va="top", fontsize=6, color="gray",
+                        bbox=dict(boxstyle="round,pad=0.1", fc="white", ec="none", alpha=0.6))
+            ax.set_xscale("log")
+            ax.set_ylim(0, 1)
+            if r == 0:
+                ax.set_title(f"current = {X}", fontsize=10,
+                             color=TYPE_COLORS.get(X), fontweight="bold")
+            if c == 0:
+                ax.set_ylabel(f"{loc}\n{ylabel_stat}", fontsize=9)
+            if r == len(rows) - 1:
+                ax.set_xlabel(xlabel)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+    type_handles = [Line2D([0], [0], color=TYPE_COLORS[Y], lw=2, label=Y) for Y in type_order]
+    per_handles = [Line2D([0], [0], color="0.35", ls=p["ls"], lw=p["lw"],
+                          marker="o", markerfacecolor=p["mfc"], markeredgecolor="0.35",
+                          label=p["label"]) for p in periods]
+    axes[0, -1].legend(handles=type_handles, title="next type", fontsize=7, loc="upper right")
+    axes[0, 0].legend(handles=per_handles, title="period", fontsize=7, loc="upper left")
+    fig.suptitle(title, y=1.01, fontsize=13)
+    fig.tight_layout()
+    return fig
+
+
+def plot_tau_curves_by_loc(pairs_by_loc, type_order, title, tau_bins=TAU_BINS,
+                           min_count=MIN_COUNT, base_by_loc=None):
+    """Grid of tau curves: rows = location, cols = current type, lines = next type.
+
+    Thin wrapper: bin each location's consecutive-transition pairs into a count
+    cube, then hand off to the shared renderer. If base_by_loc is given (e.g. the
+    raw call-abundance line from call_composition_by_loc) it overrides the
+    transition-derived chance level; otherwise the pair marginal is used.
+    """
+    counts_by_loc, pair_base = {}, {}
+    for loc, pairs in pairs_by_loc.items():
+        counts_by_loc[loc], pair_base[loc] = _counts_from_pairs(pairs, type_order, tau_bins)
+    return render_grid_from_counts(counts_by_loc, base_by_loc or pair_base, type_order, title,
+                                   tau_bins=tau_bins, min_count=min_count)
+
+
+def run(dates, out_dir, fmt, min_count, baseline="calls"):
     calls = load_calls(dates)
     print(f"{len(calls):,} calls pooled across {dates}")
     out_dir.mkdir(parents=True, exist_ok=True)
     tag = "+".join(dates)
     pairs = loc_split_pairs(calls, BOUT_CALL_TYPES, GROUP_COLS,
                             "start_time_real", "stop_time_real")
-    title = f"Call-call transition probability  (dates: {', '.join(dates)})"
-    fig = plot_tau_curves_by_loc(pairs, BOUT_CALL_TYPES, title, min_count=min_count)
-    _save_and_export(fig, out_dir / f"transition_prob_by_gap_call_{tag}.{fmt}")
+    base_by_loc = (call_composition_by_loc(calls, BOUT_CALL_TYPES)
+                   if baseline == "calls" else None)
+    suffix = "_transbase" if baseline == "transitions" else ""
+    title = ("Call-call transition probability  "
+             f"(dates: {', '.join(dates)})  "
+             + ("[chance = pair marginal]" if baseline == "transitions"
+                else "[chance = call abundance]"))
+    fig = plot_tau_curves_by_loc(pairs, BOUT_CALL_TYPES, title, min_count=min_count,
+                                 base_by_loc=base_by_loc)
+    _save_and_export(fig, out_dir / f"transition_prob_by_gap_call_{tag}{suffix}.{fmt}")
 
 
 def main() -> int:
@@ -191,12 +333,15 @@ def main() -> int:
     ap.add_argument("--format", choices=["pdf", "png"], default="pdf")
     ap.add_argument("--min-count", type=int, default=MIN_COUNT,
                     help="blank a tau bin with fewer transitions than this")
+    ap.add_argument("--baseline", choices=["calls", "transitions"], default="calls",
+                    help="chance line: 'calls' = raw call abundance n_Y/N (default, matches "
+                         "the all-pairs figure); 'transitions' = marginal over pairs")
     ap.add_argument("--per-date", action="store_true",
                     help="one figure per date instead of pooling all dates together")
     args = ap.parse_args()
     date_groups = [[d] for d in args.dates] if args.per_date else [args.dates]
     for dates in date_groups:
-        run(dates, args.out_dir, args.format, args.min_count)
+        run(dates, args.out_dir, args.format, args.min_count, args.baseline)
     return 0
 
 
