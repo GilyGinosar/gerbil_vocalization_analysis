@@ -50,7 +50,7 @@ EXPORTS_DIR = REPO_ROOT / "exports"     # also drop every saved figure here for 
 
 # Date folder(s) to run on — EDIT HERE to switch experiment (e.g. ["2025_10"]).
 # Available: 2024_12, 2025_03, 2025_07, 2025_10, 2026_02. Overridable with --dates.
-DEFAULT_DATES = ["2025_07"]
+DEFAULT_DATES = ["2026_02"]
 BIN_MINUTES = 1
 THRESHOLD = 0.1                 # min per-type-normalised rate to paint a cell
 PCT = 99.0                      # percentile used as each call type's scale
