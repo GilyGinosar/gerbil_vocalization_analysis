@@ -212,3 +212,9 @@ figures/
 
 # Local data / rendered media (not committed)
 videos/
+
+# Exported figures / analysis outputs (regenerable from scripts/analysis)
+exports/
+
+# Rendered media anywhere in the tree
+*.mp4
