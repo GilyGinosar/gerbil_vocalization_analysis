@@ -39,7 +39,8 @@ import numpy as np
 import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-for p in (REPO_ROOT, REPO_ROOT / "scripts" / "utils", REPO_ROOT / "scripts" / "analysis"):
+for p in (REPO_ROOT, REPO_ROOT / "scripts" / "utils", REPO_ROOT / "scripts" / "analysis",
+          REPO_ROOT / "scripts" / "analysis" / "exploratory"):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 

@@ -49,12 +49,15 @@ REFERENCE_SLOPE = -0.36
 # Number of log-spaced lag points to plot per curve (subsample for clean plots).
 N_LOG_LAGS = 200
 
-PARQUET_DIR = Path(
-    "/Users/gilyginosar/Dropbox (Personal)/Vocalizations_project/Data/parquet_cache"
-)
-OUTPUT_DIR  = Path(
-    "/Users/gilyginosar/Dropbox (Personal)/Vocalizations_project/Data/autocorrelation_outputs"
-)
+import platform
+
+if platform.system() == "Windows":
+    BASE_PROCESSED = Path(r"\\sanesstorage.cns.nyu.edu\archive\ginosar\Processed_data\Audio")
+else:
+    BASE_PROCESSED = Path("/mnt/home/neurostatslab/ceph/saneslab_data/gily_data/Processed_data/Audio")
+
+PARQUET_DIR = BASE_PROCESSED / "all_calls" / "parquet_cache"
+OUTPUT_DIR  = BASE_PROCESSED / "ethograms" / "autocorrelation"
 # ==========================================================================
 
 
