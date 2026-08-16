@@ -42,13 +42,13 @@ Always analyse at the date-folder level, using `start_time_real`.
 | ├ `pipelines/` | The two production pipelines (`gerbil-average-audio`, `gerbil-rms-assignment` on PATH after install) |
 | ├ `bouts.py` / `acoustic_features.py` / `sync_times.py` | Bout detection · vocalpy features · audio↔wall-clock alignment |
 | ├ `calc_transitions.py` | Legacy kitchen-sink of transition helpers (942 lines, some Windows-only) |
-| └ `*.ipynb` | Legacy notebooks from before the `notebooks/` split |
+| └ `*.ipynb` | Operational + legacy notebooks from before the `notebooks/` split — see below |
 | `scripts/pipeline/` | Data-*producing* steps — run these to build the parquet everything else reads |
 | `scripts/analysis/` | Data-*consuming* figures and models. One script per question → see index below |
 | `scripts/analysis/exploratory/` | Probes kept because committed scripts still import from them; not maintained |
 | `scripts/utils/` | `ethogram_io` (**the shared loader — 14 scripts use it**), `light_cycle`, `spectrogram_viz`, `export_sync_tidy` |
 | `scripts/video/` | `sync_video_spectrogram` (camera + spectrogram mp4), `play_spectrogram` (audio only) |
-| `notebooks/` | Current hand exploration; `notebooks/archive/` is superseded |
+| `notebooks/` | Current hand exploration — see the notebook index below; `notebooks/archive/` is superseded |
 | `slurm/` | sbatch array driver for the averaging step |
 | `exports/` `figures/` `videos/` | Local outputs — **gitignored**, all regenerable |
 
@@ -93,6 +93,65 @@ Always analyse at the date-folder level, using `start_time_real`.
 
 > The thread through this group: the next-call model mostly rediscovers "the current bout continues".
 > The memory ladder and the switch hazard exist to get past that.
+
+---
+
+## Notebooks
+
+Scripts answer a question the same way every time; notebooks are where a question is still being
+shaped. The dividing line: **anything the cluster runs is a script.**
+
+### `notebooks/` — live exploration
+
+**Bouts — does being in a bout change a call?**
+
+| Notebook | What it does |
+|---|---|
+| [alarm_bouts_clean.ipynb](notebooks/alarm_bouts_clean.ipynb) | Alarm bouts via the shared `bouts.detect_bouts`; thresholds from `BOUT_THRESHOLDS["alarm"]`. The developed one (67 cells) |
+| [high_freq_bouts_clean.ipynb](notebooks/high_freq_bouts_clean.ipynb) | Same for high-freq — **a 3-cell stub**, started and never filled in. HF+warble merged bouts still only exist in the archived v3 |
+| [warble_singletons_vs_bouts.ipynb](notebooks/warble_singletons_vs_bouts.ipynb) | Warbles that occur alone vs. warbles inside a multi-call bout |
+| [bout_transitions.ipynb](notebooks/bout_transitions.ipynb) | Bout → bout transition matrices on the 2–300 s inter-bout timescale |
+
+**Call inventory and hand labels**
+
+| Notebook | What it does |
+|---|---|
+| [explore_complex_calls.ipynb](notebooks/explore_complex_calls.ipynb) | Visual audit of the human annotations for the complex-call training set (3–4 syllable strings) — scan for label coverage gaps |
+| [tmp_new_complex_folders.ipynb](notebooks/tmp_new_complex_folders.ipynb) | The two folders added July 2026: putative call *sequences* vs. calls from *two different animals* |
+
+**Figures for talks**
+
+| Notebook | What it does |
+|---|---|
+| [talk_call_examples.ipynb](notebooks/talk_call_examples.ipynb) | Best example spectrogram per call class, picked from the top-10 highest-confidence rows |
+| [talk_warble_halfarc_stack.ipynb](notebooks/talk_warble_halfarc_stack.ipynb) | Every warble → half-arc → stack chain on a shared time axis |
+| [busy_window_spectrogram.ipynb](notebooks/busy_window_spectrogram.ipynb) | The busiest 16 s in a date folder, as 4 rows × 4 s with DAS segments overlaid |
+
+**Cross-platform**
+
+| Notebook | What it does |
+|---|---|
+| [explore_calls_xplatform.ipynb](notebooks/explore_calls_xplatform.ipynb) | Call → call transition matrices; picks Mac-Dropbox vs. cluster-ceph paths from the host OS |
+
+`notebooks/archive/` holds the superseded ancestors of the above (`alarm_bouts_3`,
+`high_freq_bouts_v3`, `explore_alarm`, `OLD_define_alarm_bouts`, plus `alarm_bouts_exploratory`,
+which is the useful one to revisit — it's the written-up record of hand-feature decoders and
+side-hypotheses that **didn't** pan out).
+
+### `vocalization_analysis/*.ipynb` — operational utilities, still useful
+
+| Notebook | What it does |
+|---|---|
+| [find_das_completed_experiments.ipynb](vocalization_analysis/find_das_completed_experiments.ipynb) | Which experiments in a date folder already have DAS output — run before a batch |
+| [check_audio_processing_consistency.ipynb](vocalization_analysis/check_audio_processing_consistency.ipynb) | Audits every experiment: processed folder exists, averaged files match the raw channel pairs, nothing missing |
+| [combine_log_files_by_date.ipynb](vocalization_analysis/combine_log_files_by_date.ipynb) | Merges the per-experiment log text files into one CSV per date folder |
+
+### `vocalization_analysis/*.ipynb` — legacy, Windows-pathed
+
+`Pre_process_A` / `pre_process_B` (pre-DAS file staging), `create_vox_csv` (builds the DAS
+training csv — channel `-1`), `Analysis__calls` (11 MB, no markdown, superseded by
+`scripts/analysis/`), and `average_audio_files` (duplicates `pipelines/average_audio.py`).
+Read for reference, don't run without checking the paths.
 
 ---
 
