@@ -18,14 +18,24 @@ Averaged_wavs_w_annotations/channel_{10,20,30}_file_NNN.wav
         ▼
 calls_confident/<params>/*_accepted_calls.csv
         │
-        │  per call: RMS in dB across the 3 channels → loudest arena wins; dedupe overlaps
-        ▼   pipelines/rms_assignment.py
+        │  assign each call to an arena. TWO scripts do this, and both write the same file:
+        │    combine_exp_calls.py    channel → arena directly  ← used for 2025_07 / 2025_10 / 2026_02
+        │    run_rms_assignment.py   RMS across channels + overlap dedupe  (needs WAV reads)
+        ▼
 <exp>/calls.csv                                        one row per call, with location
         │
-        │  pool all experiments in a date folder onto one real-time axis
-        ▼   scripts/pipeline/combine_exp_calls.py  →  cache_calls_to_parquet.py
+        │  pool every experiment in a date folder onto one real-time axis
+        ▼   scripts/pipeline/extract_calls_offline.py   → ~/offline_data/, copied to ceph
+all_calls/all_calls_<date>.csv
+        │
+        │  cache as parquet (~10x faster, keeps dtypes)
+        ▼   notebooks/explore_calls_xplatform.ipynb, first cell (Linux branch)
 all_calls/parquet_cache/all_calls_<date>.parquet       ← what every analysis script reads
 ```
+
+The last two steps are the soft spot: the copy to ceph is manual, and the parquet cache is built by
+a notebook cell rather than a script. `scripts/pipeline/cache_calls_to_parquet.py` looks like it does
+that job but is hardwired to a Mac Dropbox path — it has never run on the cluster.
 
 **A date folder (`2026_02`) is one continuous, weeks-long experiment on one gerbil family.**
 The numbered `experiment_<id>` folders inside it are just recording restarts — not conditions.
@@ -41,7 +51,7 @@ Always analyse at the date-folder level, using `start_time_real`.
 | ├ `audio_processing_config.py` | **Single source of truth**: experiment-id → date folder, channel map, skip list, raw-file naming |
 | ├ `pipelines/` | The two production pipelines (`gerbil-average-audio`, `gerbil-rms-assignment` on PATH after install) |
 | ├ `bouts.py` / `acoustic_features.py` / `sync_times.py` | Bout detection · vocalpy features · audio↔wall-clock alignment |
-| ├ `calc_transitions.py` | Legacy kitchen-sink of transition helpers (942 lines, some Windows-only) |
+| ├ `calc_transitions.py` | Transition matrices + inter-call-gap helpers. Clean library, but `plot_transition_matrices` alone is 560 of its 919 lines |
 | └ `*.ipynb` | Operational + legacy notebooks from before the `notebooks/` split — see below |
 | `scripts/pipeline/` | Data-*producing* steps — run these to build the parquet everything else reads |
 | `scripts/analysis/` | Data-*consuming* figures and models. One script per question → see index below |
@@ -190,7 +200,17 @@ Every script picks its ceph vs. SMB base path automatically from `platform.syste
 
 ## Known rough edges
 
-Every analysis script starts with a hand-rolled `sys.path` block and several redefine
-`BASE_PROCESSED` locally — `scripts/` is not a package, so they import each other by path
-injection. It works; it just isn't tidy. Notebook outputs are committed, which is why `.git`
-is large.
+- **Two scripts write `<exp>/calls.csv`** — `combine_exp_calls.py` (channel → arena) and
+  `run_rms_assignment.py` (RMS + dedupe). Whichever ran last wins, and the file records no
+  provenance. Current datasets use the first.
+- **`get_experiment_audio_dir` exists in 4 files**, `resolve_calls_confident_dir` in 2
+  (verbatim), and `BASE_PROCESSED` is redefined with its own Windows/Linux branch in 8. All of it
+  belongs next to `audio_processing_config.py`.
+- **`average_audio_files.ipynb` re-implements `pipelines/average_audio.py` inline** rather than
+  importing it — two copies of the averaging logic, free to drift.
+- **`extract_calls_offline.py` imports from `run_transitions.py`** — a pipeline step depending on
+  an analysis script, backwards from how the rest of the repo is wired.
+- Every analysis script starts with a hand-rolled `sys.path` block, because `scripts/` is not a
+  package and they import each other by path injection.
+- `calc_transitions.plot_inter_call_gap_distribution` has no callers left.
+- Notebook outputs are committed, which is why `.git` is ~500 MB.
