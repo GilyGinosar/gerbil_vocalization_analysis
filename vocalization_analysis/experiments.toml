@@ -1,0 +1,34 @@
+# Which experiment ids belong to which date folder.
+#
+# A date folder is ONE continuous, weeks-long experiment on one gerbil family.
+# The experiment ids inside it are recording restarts, not conditions.
+#
+# This file is DATA, not code: adding a date folder here needs no Python change.
+# To start a new one, add a block:
+#
+#   [date_folders.2026_08]
+#   experiments = "741-799"          # ranges and single ids, comma-separated
+#   skip        = [783, 784]         # optional: ids to leave unprocessed
+#   note        = "free text"        # optional
+#
+# `experiments` accepts "97-116", "741-760, 785, 790", or a single "785".
+# Ranges are inclusive at both ends. Ids may not appear in two date folders,
+# and every id in `skip` must fall inside that folder's own `experiments`
+# (both are checked when this file loads, so a typo fails loudly).
+
+[date_folders.2024_12]
+experiments = "97-116"
+
+[date_folders.2025_03]
+experiments = "235-237"
+skip = [236]
+
+[date_folders.2025_07]
+experiments = "272-278"
+
+[date_folders.2025_10]
+experiments = "332-344"
+
+[date_folders.2026_02]
+experiments = "492-567"
+skip = [502, 507, 524, 528, 536, 537, 538, 539, 551]

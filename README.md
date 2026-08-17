@@ -48,7 +48,8 @@ Always analyse at the date-folder level, using `start_time_real`.
 | Path | What's in it |
 |---|---|
 | `vocalization_analysis/` | Installable package — the reusable library |
-| ├ `audio_processing_config.py` | **Single source of truth**: experiment-id → date folder, channel map, skip list, raw-file naming |
+| ├ `experiments.toml` | **The experiment-id → date-folder mapping, as data.** Starting a new date folder is an edit here, no Python change |
+| ├ `audio_processing_config.py` | Reads that file and answers questions about it; also holds the mic-pair wiring and raw-filename scheme detection |
 | ├ `pipelines/` | The two production pipelines (`gerbil-average-audio`, `gerbil-rms-assignment` on PATH after install) |
 | ├ `bouts.py` / `acoustic_features.py` / `sync_times.py` | Bout detection · vocalpy features · audio↔wall-clock alignment |
 | ├ `calc_transitions.py` | Transition matrices + inter-call-gap helpers. Clean library, but `plot_transition_matrices` alone is 560 of its 919 lines |

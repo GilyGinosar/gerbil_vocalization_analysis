@@ -24,6 +24,11 @@ gerbil-rms-assignment = "vocalization_analysis.pipelines.rms_assignment:main"
 [tool.setuptools.packages.find]
 include = ["vocalization_analysis*"]
 
+[tool.setuptools.package-data]
+# experiments.toml is the experiment-id -> date-folder mapping; it must ship
+# with the package, not just exist in the source tree.
+vocalization_analysis = ["*.toml"]
+
 [dependency-groups]
 dev = [
     "ipykernel>=7.2.0",
