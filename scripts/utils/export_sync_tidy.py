@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from vocalization_analysis.audio_processing_config import get_experiment_month
+from scripts.pipeline.audio_processing_config import get_experiment_month
 from vocalization_analysis.sync_times import build_file_times
 
 BASE_PROCESSED = Path(

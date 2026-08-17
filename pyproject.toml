@@ -18,16 +18,19 @@ dependencies = [
 ]
 
 [project.scripts]
-gerbil-average-audio = "vocalization_analysis.pipelines.average_audio:main"
-gerbil-rms-assignment = "vocalization_analysis.pipelines.rms_assignment:main"
+gerbil-average-audio = "scripts.pipeline.average_audio:main"
+gerbil-rms-assignment = "scripts.pipeline.rms_assignment:main"
 
 [tool.setuptools.packages.find]
-include = ["vocalization_analysis*"]
+# `scripts` is installed too, so scripts/ modules import each other by name
+# instead of bootstrapping sys.path. Only dirs with an __init__.py are picked
+# up, so scripts/analysis and scripts/utils stay out until they get one.
+include = ["vocalization_analysis*", "scripts*"]
 
 [tool.setuptools.package-data]
 # experiments.toml is the experiment-id -> date-folder mapping; it must ship
 # with the package, not just exist in the source tree.
-vocalization_analysis = ["*.toml"]
+"scripts.pipeline" = ["*.toml"]
 
 [dependency-groups]
 dev = [

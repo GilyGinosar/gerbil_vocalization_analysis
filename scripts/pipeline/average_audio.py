@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from scipy.io import wavfile
 
-from vocalization_analysis.audio_processing_config import (
+from scripts.pipeline.audio_processing_config import (
     detect_raw_naming_scheme,
     get_channel_mapping,
     get_experiment_month,

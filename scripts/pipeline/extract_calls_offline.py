@@ -14,9 +14,9 @@ from pathlib import Path
 
 import pandas as pd
 
+# scripts/analysis has no __init__.py yet, so it is not importable by name;
+# until it is, run_transitions still has to be reached by path.
 REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
 if str(REPO_ROOT / "scripts" / "analysis") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "scripts" / "analysis"))
 

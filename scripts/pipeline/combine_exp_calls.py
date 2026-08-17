@@ -12,15 +12,10 @@ For each experiment in EXPERIMENT_IDS:
 Edit the values below and run:  python scripts/combine_exp_calls.py
 """
 import platform
-import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from vocalization_analysis.audio_processing_config import get_experiment_month
-from vocalization_analysis.pipelines.rms_assignment import (
+from scripts.pipeline.audio_processing_config import get_experiment_month
+from scripts.pipeline.rms_assignment import (
     DEFAULT_SOURCE_CHANNELS,
     build_qmc_metadata_csv,
     load_per_file_calls,

@@ -1,13 +1,8 @@
 import platform
-import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from vocalization_analysis.audio_processing_config import get_experiment_month
-from vocalization_analysis.pipelines.rms_assignment import (
+from scripts.pipeline.audio_processing_config import get_experiment_month
+from scripts.pipeline.rms_assignment import (
     RMSAssignmentConfig,
     run_rms_assignment,
 )

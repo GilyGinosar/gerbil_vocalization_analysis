@@ -32,7 +32,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from vocalization_analysis.audio_processing_config import get_experiment_month
+from scripts.pipeline.audio_processing_config import get_experiment_month
 from vocalization_analysis.calc_transitions import (
     collect_inter_call_gaps,
     collect_self_inter_call_gaps,

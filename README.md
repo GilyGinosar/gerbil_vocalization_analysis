@@ -11,7 +11,7 @@ Detecting and analysing gerbil vocalizations from a multi-arena colony recording
 experiment_<id>/concatenated_data_cam_mic_sync/       6 raw mic channels + sync.csv
         │
         │  average mic pairs → 3 virtual channels (arena_1 / arena_2 / underground)
-        ▼   pipelines/average_audio.py            [slurm/average-audio-array.sh]
+        ▼   scripts/pipeline/average_audio.py            [slurm/average-audio-array.sh]
 Averaged_wavs_w_annotations/channel_{10,20,30}_file_NNN.wav
         │
         │  DAS (external tool) detects calls
@@ -47,14 +47,15 @@ Always analyse at the date-folder level, using `start_time_real`.
 
 | Path | What's in it |
 |---|---|
-| `vocalization_analysis/` | Installable package — the reusable library |
+| `scripts/pipeline/` | Data-*producing* steps — run these to build the parquet everything else reads |
 | ├ `experiments.toml` | **The experiment-id → date-folder mapping, as data.** Starting a new date folder is an edit here, no Python change |
 | ├ `audio_processing_config.py` | Reads that file and answers questions about it; also holds the mic-pair wiring and raw-filename scheme detection |
-| ├ `pipelines/` | The two production pipelines (`gerbil-average-audio`, `gerbil-rms-assignment` on PATH after install) |
+| ├ `average_audio.py` / `rms_assignment.py` | The two production pipelines (`gerbil-average-audio`, `gerbil-rms-assignment` on PATH after install) |
+| ├ `combine_exp_calls.py` / `run_rms_assignment.py` | Drivers that turn DAS output into `<exp>/calls.csv` |
+| └ `extract_calls_offline.py` | Pools a date folder |
+| `vocalization_analysis/` | The analysis library — imported, never run |
 | ├ `bouts.py` / `acoustic_features.py` / `sync_times.py` | Bout detection · vocalpy features · audio↔wall-clock alignment |
-| ├ `calc_transitions.py` | Transition matrices + inter-call-gap helpers. Clean library, but `plot_transition_matrices` alone is 560 of its 919 lines |
-| | *(code only — no notebooks live here)* |
-| `scripts/pipeline/` | Data-*producing* steps — run these to build the parquet everything else reads |
+| └ `calc_transitions.py` | Transition matrices + inter-call-gap helpers. Clean library, but `plot_transition_matrices` alone is 560 of its 919 lines |
 | `scripts/analysis/` | Data-*consuming* figures and models. One script per question → see index below |
 | `scripts/analysis/exploratory/` | Probes kept because committed scripts still import from them; not maintained |
 | `scripts/utils/` | `ethogram_io` (**the shared loader — 14 scripts use it**), `light_cycle`, `spectrogram_viz`, `export_sync_tidy` |
@@ -156,7 +157,7 @@ side-hypotheses that **didn't** pan out).
 | [find_das_completed_experiments.ipynb](notebooks/ops/find_das_completed_experiments.ipynb) | Which experiments in a date folder already have DAS output — run before a batch |
 | [check_audio_processing_consistency.ipynb](notebooks/ops/check_audio_processing_consistency.ipynb) | Audits every experiment: processed folder exists, averaged files match the raw channel pairs, nothing missing |
 | [combine_log_files_by_date.ipynb](notebooks/ops/combine_log_files_by_date.ipynb) | Merges the per-experiment log text files into one CSV per date folder |
-| [average_audio_files.ipynb](notebooks/ops/average_audio_files.ipynb) | Interactive runner for the averaging step. ⚠ Re-implements `pipelines/average_audio.py` inline instead of importing it — the two can drift |
+| [average_audio_files.ipynb](notebooks/ops/average_audio_files.ipynb) | Interactive runner for the averaging step. ⚠ Re-implements `scripts/pipeline/average_audio.py` inline instead of importing it — the two can drift |
 
 ### `notebooks/legacy/` — pre-DAS relics, Windows-pathed
 
@@ -207,11 +208,12 @@ Every script picks its ceph vs. SMB base path automatically from `platform.syste
 - **`get_experiment_audio_dir` exists in 4 files**, `resolve_calls_confident_dir` in 2
   (verbatim), and `BASE_PROCESSED` is redefined with its own Windows/Linux branch in 8. All of it
   belongs next to `audio_processing_config.py`.
-- **`average_audio_files.ipynb` re-implements `pipelines/average_audio.py` inline** rather than
+- **`average_audio_files.ipynb` re-implements `scripts/pipeline/average_audio.py` inline** rather than
   importing it — two copies of the averaging logic, free to drift.
 - **`extract_calls_offline.py` imports from `run_transitions.py`** — a pipeline step depending on
   an analysis script, backwards from how the rest of the repo is wired.
-- Every analysis script starts with a hand-rolled `sys.path` block, because `scripts/` is not a
-  package and they import each other by path injection.
+- Analysis scripts still start with a hand-rolled `sys.path` block. `scripts/` and
+  `scripts/pipeline/` are now installed packages, so pipeline code imports by name; give
+  `scripts/analysis/` and `scripts/utils/` an `__init__.py` and those blocks go away too.
 - `calc_transitions.plot_inter_call_gap_distribution` has no callers left.
 - Notebook outputs are committed, which is why `.git` is ~500 MB.

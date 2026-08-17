@@ -34,6 +34,6 @@ def get_light_cycle(exp: int) -> tuple[int, int]:
     Maps exp -> month via the experiment-month table (still in the library for
     now; this stays correct as that logic migrates into scripts/).
     """
-    from vocalization_analysis.audio_processing_config import get_experiment_month
+    from scripts.pipeline.audio_processing_config import get_experiment_month
 
     return get_light_cycle_for_month(get_experiment_month(exp))
