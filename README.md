@@ -52,13 +52,13 @@ Always analyse at the date-folder level, using `start_time_real`.
 | ├ `pipelines/` | The two production pipelines (`gerbil-average-audio`, `gerbil-rms-assignment` on PATH after install) |
 | ├ `bouts.py` / `acoustic_features.py` / `sync_times.py` | Bout detection · vocalpy features · audio↔wall-clock alignment |
 | ├ `calc_transitions.py` | Transition matrices + inter-call-gap helpers. Clean library, but `plot_transition_matrices` alone is 560 of its 919 lines |
-| └ `*.ipynb` | Operational + legacy notebooks from before the `notebooks/` split — see below |
+| | *(code only — no notebooks live here)* |
 | `scripts/pipeline/` | Data-*producing* steps — run these to build the parquet everything else reads |
 | `scripts/analysis/` | Data-*consuming* figures and models. One script per question → see index below |
 | `scripts/analysis/exploratory/` | Probes kept because committed scripts still import from them; not maintained |
 | `scripts/utils/` | `ethogram_io` (**the shared loader — 14 scripts use it**), `light_cycle`, `spectrogram_viz`, `export_sync_tidy` |
 | `scripts/video/` | `sync_video_spectrogram` (camera + spectrogram mp4), `play_spectrogram` (audio only) |
-| `notebooks/` | Current hand exploration — see the notebook index below; `notebooks/archive/` is superseded |
+| `notebooks/` | All notebooks — see the index below. `ops/` = run-when-needed utilities, `archive/` = superseded, `legacy/` = pre-DAS relics |
 | `slurm/` | sbatch array driver for the averaging step |
 | `exports/` `figures/` `videos/` | Local outputs — **gitignored**, all regenerable |
 
@@ -148,20 +148,20 @@ shaped. The dividing line: **anything the cluster runs is a script.**
 which is the useful one to revisit — it's the written-up record of hand-feature decoders and
 side-hypotheses that **didn't** pan out).
 
-### `vocalization_analysis/*.ipynb` — operational utilities, still useful
+### `notebooks/ops/` — operational utilities, run when needed
 
 | Notebook | What it does |
 |---|---|
-| [find_das_completed_experiments.ipynb](vocalization_analysis/find_das_completed_experiments.ipynb) | Which experiments in a date folder already have DAS output — run before a batch |
-| [check_audio_processing_consistency.ipynb](vocalization_analysis/check_audio_processing_consistency.ipynb) | Audits every experiment: processed folder exists, averaged files match the raw channel pairs, nothing missing |
-| [combine_log_files_by_date.ipynb](vocalization_analysis/combine_log_files_by_date.ipynb) | Merges the per-experiment log text files into one CSV per date folder |
+| [find_das_completed_experiments.ipynb](notebooks/ops/find_das_completed_experiments.ipynb) | Which experiments in a date folder already have DAS output — run before a batch |
+| [check_audio_processing_consistency.ipynb](notebooks/ops/check_audio_processing_consistency.ipynb) | Audits every experiment: processed folder exists, averaged files match the raw channel pairs, nothing missing |
+| [combine_log_files_by_date.ipynb](notebooks/ops/combine_log_files_by_date.ipynb) | Merges the per-experiment log text files into one CSV per date folder |
+| [average_audio_files.ipynb](notebooks/ops/average_audio_files.ipynb) | Interactive runner for the averaging step. ⚠ Re-implements `pipelines/average_audio.py` inline instead of importing it — the two can drift |
 
-### `vocalization_analysis/*.ipynb` — legacy, Windows-pathed
+### `notebooks/legacy/` — pre-DAS relics, Windows-pathed
 
-`Pre_process_A` / `pre_process_B` (pre-DAS file staging), `create_vox_csv` (builds the DAS
-training csv — channel `-1`), `Analysis__calls` (11 MB, no markdown, superseded by
-`scripts/analysis/`), and `average_audio_files` (duplicates `pipelines/average_audio.py`).
-Read for reference, don't run without checking the paths.
+`Pre_process_A` / `pre_process_B` (file staging before DAS existed), `create_vox_csv` (builds the
+DAS training csv — channel `-1`), and `Analysis__calls` (11 MB, no markdown, superseded by
+`scripts/analysis/`). Read for reference; don't run without checking the paths first.
 
 ---
 
