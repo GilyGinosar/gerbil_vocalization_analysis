@@ -18,4 +18,4 @@ export UV_LINK_MODE=copy
 mkdir -p "${PROJECT_ROOT}/slurm"
 
 cd "${PROJECT_ROOT}"
-python scripts/run_average_audio_batch.py --experiment-id "${EXPERIMENT_ID}"
+python scripts/pipeline/run_average_audio_batch.py --experiment-id "${EXPERIMENT_ID}"
