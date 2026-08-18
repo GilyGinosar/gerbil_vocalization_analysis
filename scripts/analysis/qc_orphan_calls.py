@@ -41,11 +41,36 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT / "scripts" / "utils") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "scripts" / "utils"))
 
-from spectrogram_viz import plot_spectrogram  # noqa: E402
+from scipy.signal import spectrogram as _spectrogram  # noqa: E402
 
 from scripts.pipeline.paths import AUDIO_ROOT, video_detections_dir  # noqa: E402
 from scripts.pipeline.pool_calls import add_exp_times  # noqa: E402
 from scripts.pipeline.pool_detections import CAMERA_TO_LOCATION, FPS, read_files_vetted  # noqa: E402
+
+def spectrogram_db(x: np.ndarray, fs: int, nperseg: int = 1024, noverlap: int = 768):
+    """Spectrogram in dB, NOT normalised — the caller supplies the reference."""
+    f, t, Sxx = _spectrogram(x, fs=fs, nperseg=nperseg, noverlap=noverlap,
+                             scaling="spectrum", mode="magnitude")
+    return f, t, 20.0 * np.log10(Sxx + 1e-12)
+
+
+def draw_spectrogram(ax, f, t, Sxx_db, ref_db: float, t_start: float,
+                     min_freq: float = 1000.0, max_freq: float = 60000.0,
+                     vmin: float = -40.0, vmax: float = 0.0):
+    """Draw with a SHARED reference across panels.
+
+    spectrogram_viz.plot_spectrogram normalises each panel to its own maximum,
+    which makes two channels impossible to compare by eye — a quiet channel and
+    a loud one both end up with their peak at 0 dB. For deciding which arena a
+    call actually came from, both panels must share one reference.
+    """
+    m = (f >= min_freq) & (f <= max_freq)
+    mesh = ax.pcolormesh(t + t_start, f[m] / 1000.0, Sxx_db[m, :] - ref_db,
+                         shading="auto", vmin=vmin, vmax=vmax, cmap="viridis")
+    ax.set_xlabel("Time (s)"); ax.set_ylabel("Frequency (kHz)")
+    ax.set_ylim(min_freq / 1000.0, max_freq / 1000.0)
+    return mesh
+
 
 LOCATION_TO_CAMERA = {v: k for k, v in CAMERA_TO_LOCATION.items()}
 LOCATION_TO_CHANNEL = {"arena_1": "10", "arena_2": "20", "underground": "30"}
@@ -101,6 +126,25 @@ def render_call(call, exp: int, date_folder: str, det: pd.DataFrame, window_s: f
     vid_dir = video_detections_dir(date_folder, exp)
     audio_dir = AUDIO_ROOT / date_folder / str(exp) / "Averaged_wavs_w_annotations"
 
+    # pass 1: compute both channels' spectrograms so they can share a dB reference
+    specs, band_db = {}, {}
+    for loc in ARENAS:
+        wav = audio_dir / f"channel_{LOCATION_TO_CHANNEL[loc]}_file_{file_num:03d}.wav"
+        if not wav.exists():
+            specs[loc] = None
+            continue
+        # mmap + slice: these wavs are 360 s at 125 kHz (180 MB), and we need ~2 s
+        fs, raw = wavfile.read(wav, mmap=True)
+        i0, i1 = int(t0 * fs), min(int(t1 * fs), len(raw))
+        x = np.asarray(raw[i0:i1], dtype=np.float32)
+        specs[loc] = spectrogram_db(x, fs)
+        # in-call energy in the 20-60 kHz band, for an honest per-channel number
+        f, t, S = specs[loc]
+        in_call = (t + t0 >= t_call) & (t + t0 <= float(call.stop_time_file_sec))
+        band = (f >= 20000) & (f <= 60000)
+        band_db[loc] = float(np.max(S[np.ix_(band, in_call)])) if in_call.any() else float("nan")
+    ref_db = max((np.max(v[2]) for v in specs.values() if v is not None), default=0.0)
+
     for col, loc in enumerate(ARENAS):
         # --- video frame
         ax = axes[0, col]
@@ -117,28 +161,29 @@ def render_call(call, exp: int, date_folder: str, det: pd.DataFrame, window_s: f
         ax.set_title(f"{loc} ({LOCATION_TO_CAMERA[loc]}) — {n_here} detections within ±{window_s:g}s{flag}",
                      fontsize=10, color=("crimson" if loc == call.assigned_location else "black"))
 
-        # --- spectrogram
+        # --- spectrogram, shared dB scale across both panels
         ax = axes[1, col]
-        wav = audio_dir / f"channel_{LOCATION_TO_CHANNEL[loc]}_file_{file_num:03d}.wav"
-        if wav.exists():
-            # mmap + slice: these wavs are 360 s at 125 kHz (180 MB), and we need ~2 s
-            fs, raw = wavfile.read(wav, mmap=True)
-            i0, i1 = int(t0 * fs), min(int(t1 * fs), len(raw))
-            x = np.asarray(raw[i0:i1], dtype=np.float32)
-            mesh = plot_spectrogram(ax, x, fs, t_start=t0)
-            # ~500k quads per panel otherwise land in the PDF as vectors: 17 MB
-            # and 35 s per page. Rasterised they are a small image.
+        if specs[loc] is None:
+            ax.text(0.5, 0.5, "wav missing", ha="center", va="center")
+        else:
+            f, t, S = specs[loc]
+            mesh = draw_spectrogram(ax, f, t, S, ref_db, t0)
             mesh.set_rasterized(True)
             ax.axvspan(t_call, float(call.stop_time_file_sec), color="crimson", alpha=0.18)
             ax.axvline(t_call, color="crimson", lw=0.8)
-        else:
-            ax.text(0.5, 0.5, f"{wav.name} missing", ha="center", va="center")
-        ax.set_title(f"channel {LOCATION_TO_CHANNEL[loc]} ({loc})", fontsize=10)
+        peak = band_db.get(loc, float("nan"))
+        rel = peak - ref_db if peak == peak else float("nan")
+        ax.set_title(f"channel {LOCATION_TO_CHANNEL[loc]} ({loc}) — in-call peak 20-60 kHz: {rel:+.1f} dB",
+                     fontsize=10)
 
+    louder = max(band_db, key=lambda k: band_db.get(k, float("-inf"))) if band_db else "?"
+    margin = (band_db.get("arena_1", float("nan")) - band_db.get("arena_2", float("nan")))
     fig.suptitle(
         f"exp {exp} · file {file_num} · {call.start_time_real} · {call.event_type} "
-        f"· assigned {call.assigned_location} · dur {float(call.duration_sec)*1000:.0f} ms",
-        fontsize=11)
+        f"· assigned {call.assigned_location} · dur {float(call.duration_sec)*1000:.0f} ms\n"
+        f"louder channel: {louder}   (arena_1 − arena_2 = {margin:+.1f} dB in band)   "
+        f"— both panels share one dB reference",
+        fontsize=10)
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     return fig
 
