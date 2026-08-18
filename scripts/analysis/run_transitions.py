@@ -33,6 +33,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.pipeline.audio_processing_config import get_experiment_month
+from scripts.pipeline.pool_calls import add_exp_times  # canonical implementation
 from vocalization_analysis.calc_transitions import (
     collect_inter_call_gaps,
     collect_self_inter_call_gaps,
@@ -99,94 +100,6 @@ def list_experiment_ids_for_date(date_folder: str) -> list[int]:
 
 def get_experiment_sync_path(exp: int) -> Path:
     return BASE_RAW / f"experiment_{exp}" / "concatenated_data_cam_mic_sync" / "sync.csv"
-
-
-def _parse_sync_field(value):
-    return ast.literal_eval(value) if isinstance(value, str) else value
-
-
-def _file_index_from_video_list(video_list) -> int | None:
-    """Pull the trailing _NNN file index from a sync.csv `video` row.
-
-    All entries within a single row share the same _NNN suffix regardless of
-    camera angle (e.g. video_center_001, video_gily_center_001, video_nest_top_001
-    all came from the same chunk), so we just try each entry until one parses.
-    """
-    if video_list is None or (isinstance(video_list, float) and np.isnan(video_list)):
-        return None
-    for entry in video_list:
-        s = str(entry)
-        try:
-            return int(s.rsplit("_", 1)[-1])
-        except (ValueError, IndexError):
-            continue
-    return None
-
-
-def add_exp_times(exp: int) -> pd.DataFrame:
-    """Return calls for `exp` with experiment-seconds + wall-clock columns added.
-
-    Reads calls.csv (output of combine_exp_calls.py) and the experiment's
-    sync.csv. Each call's per-file time is shifted by its chunk's offset
-    relative to experiment start.
-
-    Adds columns:
-      - channel (renamed from assigned_channel)
-      - start_time_experiment_sec, stop_time_experiment_sec
-      - start_time_real, stop_time_real
-    """
-    exp_dir = get_experiment_audio_dir(exp)
-    calls_path = exp_dir / "calls.csv"
-    sync_path = get_experiment_sync_path(exp)
-
-    if not calls_path.exists():
-        raise FileNotFoundError(f"calls.csv not found: {calls_path}")
-    if not sync_path.exists():
-        raise FileNotFoundError(f"sync.csv not found: {sync_path}")
-
-    sync_df = pd.read_csv(sync_path)
-    sync_df["timestamp"] = sync_df["timestamp"].apply(_parse_sync_field)
-    if "video" not in sync_df.columns:
-        raise ValueError(f"sync.csv missing 'video' column: {sync_path}")
-    sync_df["video"] = sync_df["video"].apply(_parse_sync_field)
-    sync_df["chunk_start_real"] = pd.to_datetime(sync_df["timestamp"].apply(lambda t: t[0]))
-    sync_df["file_num"] = sync_df["video"].apply(_file_index_from_video_list)
-    sync_df = sync_df.dropna(subset=["file_num", "chunk_start_real"]).copy()
-    sync_df["file_num"] = sync_df["file_num"].astype(int)
-
-    experiment_start_real = sync_df["chunk_start_real"].min()
-    sync_df["chunk_offset_sec"] = (sync_df["chunk_start_real"] - experiment_start_real).dt.total_seconds()
-
-    file_to_offset = dict(zip(sync_df["file_num"], sync_df["chunk_offset_sec"]))
-    file_to_real = dict(zip(sync_df["file_num"], sync_df["chunk_start_real"]))
-
-    calls = pd.read_csv(calls_path)
-    if "assigned_channel" in calls.columns and "channel" not in calls.columns:
-        calls = calls.rename(columns={"assigned_channel": "channel"})
-
-    calls = calls.dropna(subset=["file_num"]).copy()
-    calls["file_num"] = calls["file_num"].astype(int)
-
-    missing = sorted({int(fn) for fn in calls["file_num"].unique() if fn not in file_to_offset})
-    if missing:
-        sample = ", ".join(str(m) for m in missing[:5]) + ("..." if len(missing) > 5 else "")
-        print(f"  exp {exp}: dropping calls for {len(missing)} file_num(s) not in sync.csv: {sample}")
-        calls = calls[calls["file_num"].isin(file_to_offset)].copy()
-
-    if calls.empty:
-        raise ValueError(
-            f"No calls in exp {exp} have a file_num present in sync.csv "
-            f"(sync had {len(file_to_offset)} mappable chunks)."
-        )
-
-    chunk_offset = calls["file_num"].map(file_to_offset)
-    chunk_real = calls["file_num"].map(file_to_real)
-    calls["start_time_experiment_sec"] = chunk_offset + calls["start_time_file_sec"]
-    calls["stop_time_experiment_sec"]  = chunk_offset + calls["stop_time_file_sec"]
-    calls["start_time_real"] = chunk_real + pd.to_timedelta(calls["start_time_file_sec"], unit="s")
-    calls["stop_time_real"]  = chunk_real + pd.to_timedelta(calls["stop_time_file_sec"], unit="s")
-
-    return calls
 
 
 def _is_in_daytime(hours: pd.Series, light_start: int, light_end: int) -> pd.Series:

@@ -24,18 +24,11 @@ calls_confident/<params>/*_accepted_calls.csv
         ▼
 <exp>/calls.csv                                        one row per call, with location
         │
-        │  pool every experiment in a date folder onto one real-time axis
-        ▼   scripts/pipeline/extract_calls_offline.py   → ~/offline_data/, copied to ceph
+        │  pool onto one real-time axis, write to ceph, cache as parquet — one command
+        ▼   scripts/pipeline/pool_calls.py --date-folder 2026_08
 all_calls/all_calls_<date>.csv
-        │
-        │  cache as parquet (~10x faster, keeps dtypes)
-        ▼   notebooks/explore_calls_xplatform.ipynb, first cell (Linux branch)
 all_calls/parquet_cache/all_calls_<date>.parquet       ← what every analysis script reads
 ```
-
-The last two steps are the soft spot: the copy to ceph is manual, and the parquet cache is built by
-a notebook cell rather than a script. `scripts/pipeline/cache_calls_to_parquet.py` looks like it does
-that job but is hardwired to a Mac Dropbox path — it has never run on the cluster.
 
 **A date folder (`2026_02`) is one continuous, weeks-long experiment on one gerbil family.**
 The numbered `experiment_<id>` folders inside it are just recording restarts — not conditions.
@@ -51,8 +44,9 @@ Always analyse at the date-folder level, using `start_time_real`.
 | ├ `experiments.toml` | **The experiment-id → date-folder mapping, as data.** Starting a new date folder is an edit here, no Python change |
 | ├ `audio_processing_config.py` | Reads that file and answers questions about it; also holds the mic-pair wiring and raw-filename scheme detection |
 | ├ `average_audio.py` / `rms_assignment.py` | The two production pipelines (`gerbil-average-audio`, `gerbil-rms-assignment` on PATH after install) |
+| ├ `paths.py` | The data roots and per-experiment path helpers — one place, no per-script copies |
 | ├ `combine_exp_calls.py` / `run_rms_assignment.py` | Drivers that turn DAS output into `<exp>/calls.csv` |
-| └ `extract_calls_offline.py` | Pools a date folder |
+| └ `pool_calls.py` | Pools a date folder → ceph CSV + parquet cache |
 | `vocalization_analysis/` | The analysis library — imported, never run |
 | ├ `bouts.py` / `acoustic_features.py` / `sync_times.py` | Bout detection · vocalpy features · audio↔wall-clock alignment |
 | └ `calc_transitions.py` | Transition matrices + inter-call-gap helpers. Clean library, but `plot_transition_matrices` alone is 560 of its 919 lines |
@@ -170,6 +164,11 @@ DAS training csv — channel `-1`), and `Analysis__calls` (11 MB, no markdown, s
 ## Running things
 
 ```bash
+# produce data for a new date folder (after DAS has run)
+python scripts/pipeline/combine_exp_calls.py --date-folder 2026_08
+python scripts/pipeline/pool_calls.py        --date-folder 2026_08
+
+# then analyse it
 .venv/bin/python scripts/analysis/run_switch_hazard.py --dates 2026_02 --format png
 ```
 
@@ -205,13 +204,11 @@ Every script picks its ceph vs. SMB base path automatically from `platform.syste
 - **Two scripts write `<exp>/calls.csv`** — `combine_exp_calls.py` (channel → arena) and
   `run_rms_assignment.py` (RMS + dedupe). Whichever ran last wins, and the file records no
   provenance. Current datasets use the first.
-- **`get_experiment_audio_dir` exists in 4 files**, `resolve_calls_confident_dir` in 2
-  (verbatim), and `BASE_PROCESSED` is redefined with its own Windows/Linux branch in 8. All of it
-  belongs next to `audio_processing_config.py`.
+- **`get_experiment_audio_dir` and `BASE_PROCESSED` are still copied across the analysis scripts.**
+  `scripts/pipeline/paths.py` is now the single home; the pipeline uses it, the analysis scripts
+  don't yet.
 - **`average_audio_files.ipynb` re-implements `scripts/pipeline/average_audio.py` inline** rather than
   importing it — two copies of the averaging logic, free to drift.
-- **`extract_calls_offline.py` imports from `run_transitions.py`** — a pipeline step depending on
-  an analysis script, backwards from how the rest of the repo is wired.
 - Analysis scripts still start with a hand-rolled `sys.path` block. `scripts/` and
   `scripts/pipeline/` are now installed packages, so pipeline code imports by name; give
   `scripts/analysis/` and `scripts/utils/` an `__init__.py` and those blocks go away too.
