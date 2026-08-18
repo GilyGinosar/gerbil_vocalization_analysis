@@ -125,11 +125,17 @@ def load_experiment_detections(date_folder: str, exp: int) -> tuple[pd.DataFrame
         df["start_time_real"] = chunk_start + pd.to_timedelta(df["frame_id"] / FPS, unit="s")
         det_frames.append(df)
 
+    coverage_df = pd.DataFrame(coverage)
+    if not coverage_df.empty:
+        # nullable Int64, so "no detections" reads as <NA> instead of demoting the
+        # whole column to float and showing frame numbers as 10799.0
+        coverage_df["max_frame_id"] = coverage_df["max_frame_id"].astype("Int64")
+
     cols = ["exp", "location", "camera", "file_num", "frame_id", "det_id", "conf",
             "center_x", "center_y", "bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2",
             "start_time_real"]
     dets = pd.concat(det_frames, ignore_index=True)[cols] if det_frames else pd.DataFrame(columns=cols)
-    return dets, pd.DataFrame(coverage)
+    return dets, coverage_df
 
 
 def write_experiment(date_folder: str, exp: int, skip_existing: bool = False) -> tuple[Path, Path] | None:
