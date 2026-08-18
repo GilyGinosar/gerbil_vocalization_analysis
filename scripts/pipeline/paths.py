@@ -25,6 +25,12 @@ AUDIO_ROOT = PROCESSED_ROOT / "Audio"
 ALL_CALLS_DIR = AUDIO_ROOT / "all_calls"
 PARQUET_DIR = ALL_CALLS_DIR / "parquet_cache"
 
+# Per-frame animal detections from the Gerbil-Detection-and-Tracking repo.
+# See its OUTPUT_FORMAT.md for the CSV contract.
+VIDEO_ROOT = PROCESSED_ROOT / "Video"
+# Pooled, timestamped detections + coverage (written by pool_detections.py).
+DETECTIONS_DIR = VIDEO_ROOT / "pooled"
+
 
 def experiment_audio_dir(exp: int) -> Path:
     """<AUDIO_ROOT>/<date folder>/<exp>/ — where this experiment's outputs live."""
@@ -51,3 +57,8 @@ def list_experiment_ids_for_date(date_folder: str) -> list[int]:
     if not folder.exists():
         raise FileNotFoundError(f"Date folder not found: {folder}")
     return sorted(int(p.name) for p in folder.iterdir() if p.is_dir() and p.name.isdigit())
+
+
+def video_detections_dir(date_folder: str, exp: int) -> Path:
+    """Where the per-video detection CSVs for one experiment live."""
+    return VIDEO_ROOT / date_folder / str(exp)

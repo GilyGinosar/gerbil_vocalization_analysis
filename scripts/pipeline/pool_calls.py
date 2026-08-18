@@ -58,6 +58,31 @@ def _file_index_from_video_list(video_list) -> int | None:
     return None
 
 
+def chunk_start_times(exp: int) -> tuple[dict[int, pd.Timestamp], dict[int, float]]:
+    """Map file_num -> (wall-clock start of that chunk, seconds since experiment start).
+
+    Shared by the call and detection pooling: both put a per-file time onto the
+    same experiment-wide clock, using the same sync.csv.
+    """
+    sync_path = experiment_sync_path(exp)
+    if not sync_path.exists():
+        raise FileNotFoundError(f"sync.csv not found: {sync_path}")
+    sync_df = pd.read_csv(sync_path)
+    if "video" not in sync_df.columns:
+        raise ValueError(f"sync.csv missing 'video' column: {sync_path}")
+    sync_df["timestamp"] = sync_df["timestamp"].apply(_parse_sync_field)
+    sync_df["video"] = sync_df["video"].apply(_parse_sync_field)
+    sync_df["chunk_start_real"] = pd.to_datetime(sync_df["timestamp"].apply(lambda t: t[0]))
+    sync_df["file_num"] = sync_df["video"].apply(_file_index_from_video_list)
+    sync_df = sync_df.dropna(subset=["file_num", "chunk_start_real"]).copy()
+    sync_df["file_num"] = sync_df["file_num"].astype(int)
+
+    start = sync_df["chunk_start_real"].min()
+    sync_df["chunk_offset_sec"] = (sync_df["chunk_start_real"] - start).dt.total_seconds()
+    return (dict(zip(sync_df["file_num"], sync_df["chunk_start_real"])),
+            dict(zip(sync_df["file_num"], sync_df["chunk_offset_sec"])))
+
+
 def add_exp_times(exp: int) -> pd.DataFrame:
     """Return calls for `exp` with experiment-seconds + wall-clock columns added.
 
@@ -69,30 +94,9 @@ def add_exp_times(exp: int) -> pd.DataFrame:
     start/stop_time_real.
     """
     calls_path = experiment_audio_dir(exp) / "calls.csv"
-    sync_path = experiment_sync_path(exp)
-
     if not calls_path.exists():
         raise FileNotFoundError(f"calls.csv not found: {calls_path}")
-    if not sync_path.exists():
-        raise FileNotFoundError(f"sync.csv not found: {sync_path}")
-
-    sync_df = pd.read_csv(sync_path)
-    if "video" not in sync_df.columns:
-        raise ValueError(f"sync.csv missing 'video' column: {sync_path}")
-    sync_df["timestamp"] = sync_df["timestamp"].apply(_parse_sync_field)
-    sync_df["video"] = sync_df["video"].apply(_parse_sync_field)
-    sync_df["chunk_start_real"] = pd.to_datetime(sync_df["timestamp"].apply(lambda t: t[0]))
-    sync_df["file_num"] = sync_df["video"].apply(_file_index_from_video_list)
-    sync_df = sync_df.dropna(subset=["file_num", "chunk_start_real"]).copy()
-    sync_df["file_num"] = sync_df["file_num"].astype(int)
-
-    experiment_start_real = sync_df["chunk_start_real"].min()
-    sync_df["chunk_offset_sec"] = (
-        sync_df["chunk_start_real"] - experiment_start_real
-    ).dt.total_seconds()
-
-    file_to_offset = dict(zip(sync_df["file_num"], sync_df["chunk_offset_sec"]))
-    file_to_real = dict(zip(sync_df["file_num"], sync_df["chunk_start_real"]))
+    file_to_real, file_to_offset = chunk_start_times(exp)
 
     calls = pd.read_csv(calls_path)
     if "assigned_channel" in calls.columns and "channel" not in calls.columns:
