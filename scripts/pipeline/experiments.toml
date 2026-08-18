@@ -32,3 +32,6 @@ experiments = "332-344"
 [date_folders.2026_02]
 experiments = "492-567"
 skip = [502, 507, 524, 528, 536, 537, 538, 539, 551]
+
+[date_folders.2026_08]
+experiments = "741-815" 

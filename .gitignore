@@ -218,3 +218,8 @@ exports/
 
 # Rendered media anywhere in the tree
 *.mp4
+
+# SLURM per-task logs (written next to the sbatch scripts)
+slurm/slurm-*.out
+slurm/slurm-*.err
+slurm/logs/

@@ -5,7 +5,7 @@
 #SBATCH -c 8
 #SBATCH --mem=24GB
 #SBATCH --time=24:00:00
-#SBATCH --array=115
+#SBATCH --array=742,744,748,759,777,785,790   # 2026_08: the experiments concatenated so far
 
 set -euo pipefail
 
