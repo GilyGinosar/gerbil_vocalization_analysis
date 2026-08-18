@@ -27,6 +27,11 @@ The per-experiment files are the unit of work: pooling is a cheap concat of
 them, so re-running after a few more experiments finish tracking does not
 re-read every CSV (see --skip-existing).
 
+Detections carry a `stationary` flag: True where the exact coordinate recurs
+1000+ times within an experiment+location, which means the detector locked onto a
+fixed object rather than an animal. Filter it out for occupancy
+(`det[~det.stationary]`); it is 19.9% of arena_2 in 2026_02.
+
 `files_vetted` records which videos were actually looked at. A detections table
 alone cannot tell "nobody was visible" from "that video was never tracked" —
 both are simply absent rows. Roughly a third of the videos legitimately contain
@@ -82,7 +87,15 @@ CSV_PATTERN = re.compile(r"^video_(?P<camera>.+)_(?P<file_num>\d+)\.csv$")
 
 DETECTION_COLS = ["exp", "location", "file_num", "frame_id", "det_id", "conf",
                   "center_x", "center_y", "bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2",
-                  "start_time_real"]
+                  "start_time_real", "stationary"]
+
+# A detection is marked `stationary` when its exact (center_x, center_y) recurs at
+# least this often within one experiment+location. At 30 fps that is ~33 s at an
+# identical sub-millimetre point, which an animal cannot do — it is the detector
+# locking onto an object. In 2026_02 this is a piece of plastic a gerbil dragged
+# into arena_2 on 2026-02-22, and it accounts for 19.9% of that arena's detections
+# (68.5% in exp 508). Flagged, never dropped: the caller decides.
+STATIONARY_REPEATS = 1000
 
 
 def read_files_vetted(path: Path) -> pd.DataFrame:
@@ -105,7 +118,15 @@ def _parse_csv_name(path: Path) -> tuple[str, int] | None:
     return m.group("camera"), int(m.group("file_num"))
 
 
-def load_experiment_detections(date_folder: str, exp: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+def flag_stationary(dets: pd.DataFrame, min_repeats: int = STATIONARY_REPEATS) -> pd.Series:
+    """True where a detection sits on an exact coordinate that recurs implausibly often."""
+    counts = dets.groupby(["location", "center_x", "center_y"])["frame_id"].transform("size")
+    return counts >= min_repeats
+
+
+def load_experiment_detections(date_folder: str, exp: int,
+                               stationary_repeats: int = STATIONARY_REPEATS
+                               ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Return (detections, files_vetted) for one experiment."""
     folder = video_detections_dir(date_folder, exp)
     if not folder.exists():
@@ -157,18 +178,23 @@ def load_experiment_detections(date_folder: str, exp: int) -> tuple[pd.DataFrame
         # whole column to float and showing frame numbers as 10799.0
         vetted_df["max_frame_id"] = vetted_df["max_frame_id"].astype("Int64")
 
-    dets = (pd.concat(det_frames, ignore_index=True)[DETECTION_COLS] if det_frames
-            else pd.DataFrame(columns=DETECTION_COLS))
+    if det_frames:
+        dets = pd.concat(det_frames, ignore_index=True)
+        dets["stationary"] = flag_stationary(dets, stationary_repeats)
+        dets = dets[DETECTION_COLS]
+    else:
+        dets = pd.DataFrame(columns=DETECTION_COLS)
     return dets, vetted_df
 
 
-def write_experiment(date_folder: str, exp: int, skip_existing: bool = False) -> tuple[Path, Path]:
+def write_experiment(date_folder: str, exp: int, skip_existing: bool = False,
+                     stationary_repeats: int = STATIONARY_REPEATS) -> tuple[Path, Path]:
     """Build one experiment's detections.parquet + files_vetted.parquet."""
     folder = video_detections_dir(date_folder, exp)
     det_path, vetted_path = folder / "detections.parquet", folder / "files_vetted.csv"
     if skip_existing and det_path.exists() and vetted_path.exists():
         return det_path, vetted_path
-    dets, vetted = load_experiment_detections(date_folder, exp)
+    dets, vetted = load_experiment_detections(date_folder, exp, stationary_repeats)
     dets.to_parquet(det_path, index=False)
     vetted.to_csv(vetted_path, index=False)
     return det_path, vetted_path
@@ -220,6 +246,10 @@ def run(date_folders: list[str], dry_run: bool, skip_existing: bool) -> int:
         empty = int((vetted["n_detections"] == 0).sum())
         print(f"  {len(dets):,} detections from {vetted['exp'].nunique()} experiments, {len(vetted)} videos")
         print(f"  videos with zero detections: {empty}/{len(vetted)} ({100*empty/len(vetted):.0f}%)")
+        if "stationary" in dets.columns and len(dets):
+            st = dets.groupby("location")["stationary"].mean()
+            print("  flagged `stationary` (detector stuck on an object): "
+                  + ", ".join(f"{k} {100*v:.1f}%" for k, v in st.items()))
         print("  per-location:")
         for loc, grp in vetted.groupby("location"):
             print(f"    {loc:<12} {len(grp):4d} videos, {grp['exp'].nunique():2d} experiments, "
