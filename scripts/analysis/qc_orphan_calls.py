@@ -42,6 +42,7 @@ if str(REPO_ROOT / "scripts" / "utils") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "scripts" / "utils"))
 
 from scipy.signal import spectrogram as _spectrogram  # noqa: E402
+from spectrogram_viz import COLOR_MAP  # noqa: E402
 
 from scripts.pipeline.paths import AUDIO_ROOT, video_detections_dir  # noqa: E402
 from scripts.pipeline.pool_calls import add_exp_times  # noqa: E402
@@ -77,7 +78,8 @@ LOCATION_TO_CHANNEL = {"arena_1": "10", "arena_2": "20", "underground": "30"}
 ARENAS = ["arena_1", "arena_2"]
 
 
-def find_orphan_calls(date_folder: str, exp: int, location: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+def find_orphan_calls(date_folder: str, exp: int, location: str
+                      ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Calls assigned to `location` in minutes with zero detections there."""
     det = pd.read_parquet(video_detections_dir(date_folder, exp) / "detections.parquet")
     vet = read_files_vetted(video_detections_dir(date_folder, exp) / "files_vetted.csv")
@@ -95,7 +97,7 @@ def find_orphan_calls(date_folder: str, exp: int, location: str) -> tuple[pd.Dat
 
     calls["min"] = calls.start_time_real.dt.floor("1min")
     mine = calls[(calls.assigned_location == location) & (calls["min"].isin(empty_minutes))].copy()
-    return mine.sort_values("start_time_real").reset_index(drop=True), det
+    return mine.sort_values("start_time_real").reset_index(drop=True), det, calls
 
 
 def grab_frame(video_path: Path, t_s: float, downscale: int = 2) -> np.ndarray | None:
@@ -117,7 +119,8 @@ def grab_frame(video_path: Path, t_s: float, downscale: int = 2) -> np.ndarray |
     return frame[::downscale, ::downscale]
 
 
-def render_call(call, exp: int, date_folder: str, det: pd.DataFrame, window_s: float):
+def render_call(call, exp: int, date_folder: str, det: pd.DataFrame, allc: pd.DataFrame,
+                window_s: float):
     file_num = int(call.file_num)
     t_call = float(call.start_time_file_sec)
     t0, t1 = max(0.0, t_call - window_s), t_call + window_s
@@ -163,27 +166,50 @@ def render_call(call, exp: int, date_folder: str, det: pd.DataFrame, window_s: f
 
         # --- spectrogram, shared dB scale across both panels
         ax = axes[1, col]
+        n_here_calls = 0
         if specs[loc] is None:
             ax.text(0.5, 0.5, "wav missing", ha="center", va="center")
         else:
             f, t, S = specs[loc]
             mesh = draw_spectrogram(ax, f, t, S, ref_db, t0)
             mesh.set_rasterized(True)
-            ax.axvspan(t_call, float(call.stop_time_file_sec), color="crimson", alpha=0.18)
-            ax.axvline(t_call, color="crimson", lw=0.8)
+            # Shade only the calls DAS detected on THIS channel. A sound marked
+            # in both panels was detected twice = leakage; marked in one panel
+            # only, it fired on that channel alone.
+            here = allc[(allc.assigned_location == loc) & (allc.file_num == file_num) &
+                        (allc.stop_time_file_sec >= t0) & (allc.start_time_file_sec <= t1)]
+            for c2 in here.itertuples():
+                colour = COLOR_MAP.get(str(c2.event_type), "tab:gray")
+                ax.axvspan(float(c2.start_time_file_sec), float(c2.stop_time_file_sec),
+                           color=colour, alpha=0.30)
+                ax.text(float(c2.start_time_file_sec), 57, str(c2.event_type),
+                        color=colour, fontsize=6.5, va="top", rotation=90)
+            n_here_calls = len(here)
+            # the call this page is about
+            ax.axvline(t_call, color="crimson", lw=1.4, ls="--")
+            ax.axvline(float(call.stop_time_file_sec), color="crimson", lw=1.4, ls="--")
         peak = band_db.get(loc, float("nan"))
         rel = peak - ref_db if peak == peak else float("nan")
-        ax.set_title(f"channel {LOCATION_TO_CHANNEL[loc]} ({loc}) — in-call peak 20-60 kHz: {rel:+.1f} dB",
-                     fontsize=10)
+        ax.set_title(f"channel {LOCATION_TO_CHANNEL[loc]} ({loc}) — in-call peak {rel:+.1f} dB"
+                     f"  ·  {n_here_calls} call(s) DETECTED on this channel in view",
+                     fontsize=9.5)
 
+    ug = allc[(allc.assigned_location == "underground") & (allc.file_num == file_num) &
+              (allc.stop_time_file_sec >= t_call - 0.05) & (allc.start_time_file_sec <= t_call + 0.05)]
+    simultaneous = allc[(allc.file_num == file_num) &
+                        (allc.stop_time_file_sec >= t_call - 0.05) &
+                        (allc.start_time_file_sec <= t_call + 0.05)]
+    where = ", ".join(f"{k}x{v}" for k, v in simultaneous.assigned_location.value_counts().items())
     louder = max(band_db, key=lambda k: band_db.get(k, float("-inf"))) if band_db else "?"
     margin = (band_db.get("arena_1", float("nan")) - band_db.get("arena_2", float("nan")))
     fig.suptitle(
         f"exp {exp} · file {file_num} · {call.start_time_real} · {call.event_type} "
         f"· assigned {call.assigned_location} · dur {float(call.duration_sec)*1000:.0f} ms\n"
         f"louder channel: {louder}   (arena_1 − arena_2 = {margin:+.1f} dB in band)   "
-        f"— both panels share one dB reference",
-        fontsize=10)
+        f"— both panels share one dB reference\n"
+        f"detected within ±50 ms on: {where}"
+        f"{'   <-- SAME SOUND DETECTED ON >1 CHANNEL = LEAKAGE' if len(simultaneous) > 1 else ''}",
+        fontsize=9.5)
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     return fig
 
@@ -201,7 +227,7 @@ def main() -> int:
     if shutil.which("ffmpeg") is None:
         raise SystemExit("ffmpeg not found on PATH. Run:  module load ffmpeg")
 
-    calls, det = find_orphan_calls(args.date_folder, args.exp, args.location)
+    calls, det, allc = find_orphan_calls(args.date_folder, args.exp, args.location)
     if args.limit:
         calls = calls.head(args.limit)
     print(f"exp {args.exp}: {len(calls)} calls assigned to {args.location} in minutes with no "
@@ -214,7 +240,7 @@ def main() -> int:
     pdf_path = args.out / f"orphan_calls_{args.date_folder}_exp{args.exp}_{args.location}.pdf"
     with PdfPages(pdf_path) as pdf:
         for i, call in enumerate(calls.itertuples(), 1):
-            fig = render_call(call, args.exp, args.date_folder, det, args.window_s)
+            fig = render_call(call, args.exp, args.date_folder, det, allc, args.window_s)
             pdf.savefig(fig, dpi=110); plt.close(fig)
             if i % 10 == 0 or i == len(calls):
                 print(f"  {i}/{len(calls)} pages")
