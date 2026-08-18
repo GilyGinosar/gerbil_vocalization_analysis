@@ -41,6 +41,9 @@ Always analyse at the date-folder level, using `start_time_real`.
 In order. Steps 2–7 are re-run as more experiments finish concatenating — the raw data usually
 arrives in batches, so expect several passes.
 
+> **Activate the venv first** — `source .venv/bin/activate`. The cluster's default `python` is the
+> Lmod Jupyter module and has no pandas, so every `python` below means the repo's `.venv`.
+
 **1. Declare it.** Add a block to [scripts/pipeline/experiments.toml](scripts/pipeline/experiments.toml).
 This is the only file that needs editing; nothing else knows about date folders.
 
@@ -131,7 +134,8 @@ Some scripts still carry a hardcoded `DATE_FOLDERS` default listing the older co
 | ├ `average_audio.py` / `rms_assignment.py` | The two production pipelines (`gerbil-average-audio`, `gerbil-rms-assignment` on PATH after install) |
 | ├ `paths.py` | The data roots and per-experiment path helpers — one place, no per-script copies |
 | ├ `combine_exp_calls.py` / `run_rms_assignment.py` | Drivers that turn DAS output into `<exp>/calls.csv` |
-| └ `pool_calls.py` | Pools a date folder → ceph CSV + parquet cache |
+| ├ `pool_calls.py` | Pools a date folder → ceph CSV + parquet cache |
+| └ `pool_detections.py` | Pools per-frame animal detections (from the tracking repo) onto the calls' clock, + a coverage table |
 | `vocalization_analysis/` | The analysis library — imported, never run |
 | ├ `bouts.py` / `acoustic_features.py` / `sync_times.py` | Bout detection · vocalpy features · audio↔wall-clock alignment |
 | └ `calc_transitions.py` | Transition matrices + inter-call-gap helpers. Clean library, but `plot_transition_matrices` alone is 560 of its 919 lines |
@@ -249,18 +253,21 @@ DAS training csv — channel `-1`), and `Analysis__calls` (11 MB, no markdown, s
 ## Running things
 
 ```bash
+source .venv/bin/activate     # required: the default cluster python has no pandas
+
 # produce data for a new date folder (after DAS has run)
 python scripts/pipeline/combine_exp_calls.py --date-folder 2026_08
 python scripts/pipeline/pool_calls.py        --date-folder 2026_08
 
 # then analyse it
-.venv/bin/python scripts/analysis/run_switch_hazard.py --dates 2026_02 --format png
+python scripts/analysis/run_switch_hazard.py --dates 2026_02 --format png
 ```
 
 Near-universal conventions in `scripts/analysis/`: `--dates` (one or more date folders),
 `--out-dir`, `--format {pdf,png}`. Figures land in `exports/`.
 
-Use the repo `.venv` — the registered `gerbil-vox-jupyter` Jupyter kernel is missing pandas.
+Use the repo `.venv` for everything. The cluster's default `python` (the Lmod Jupyter module) and
+the registered `gerbil-vox-jupyter` kernel both lack pandas, and fail with `ModuleNotFoundError`.
 Every script picks its ceph vs. SMB base path automatically from `platform.system()`.
 
 ---
