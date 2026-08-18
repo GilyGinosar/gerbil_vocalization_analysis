@@ -13,21 +13,20 @@ cannot follow an individual.
 Written per experiment, then pooled per date folder — mirroring how calls.csv
 sits in each experiment folder and all_calls_<date> pools them:
 
-    <date>/<exp>/detections.parquet     that experiment's detections, timestamped
-    <date>/<exp>/coverage.parquet       one row per video of that experiment
-    <date>/detections_<date>.parquet    every experiment concatenated
-    <date>/coverage_<date>.parquet      ditto
+    <date>/<exp>/detections.parquet      that experiment's detections, timestamped
+    <date>/<exp>/files_vetted.parquet    one row per video of that experiment
+    <date>/detections_<date>.parquet     every experiment concatenated
+    <date>/files_vetted_<date>.parquet   ditto
 
 The per-experiment files are the unit of work: pooling is a cheap concat of
 them, so re-running after a few more experiments finish tracking does not
 re-read every CSV (see --skip-existing).
 
-The coverage table exists because a detections table alone cannot distinguish
-"nobody was visible" from "that video was never tracked" — both are simply
-absent rows. Roughly a third of the CSVs are legitimately empty, and some
-experiments have only one camera tracked, so filling missing frames with zeros
-would invent an empty arena. Bin occupancy against coverage, not against the
-detections alone.
+`files_vetted` records which videos were actually looked at. A detections table
+alone cannot tell "nobody was visible" from "that video was never tracked" —
+both are simply absent rows. Roughly a third of the videos legitimately contain
+zero detections, and some experiments have only one arena filmed, so binning
+occupancy without consulting files_vetted would invent an empty arena.
 
     python scripts/pipeline/pool_detections.py --date-folder 2026_02
 """
@@ -41,8 +40,8 @@ import pandas as pd
 
 from scripts.pipeline.audio_processing_config import list_date_folders
 from scripts.pipeline.paths import (
-    pooled_coverage_path,
     pooled_detections_path,
+    pooled_files_vetted_path,
     video_date_dir,
     video_detections_dir,
 )
@@ -50,12 +49,13 @@ from scripts.pipeline.pool_calls import chunk_start_times
 
 FPS = 30.0  # OUTPUT_FORMAT.md: seconds = frame_id / FPS
 
-# Which arena each camera films, in the vocabulary calls.csv already uses
-# (assigned_location: arena_1 / arena_2 / underground).
+# Which arena each camera films. Cameras appear only in the input filenames; in
+# the data itself we use `location`, the same vocabulary calls.csv uses for
+# assigned_location (arena_1 / arena_2 / underground).
 #
 # VERIFIED 2026-08-17 against the calls themselves, on the 332 chunks of 2026_02
-# where both cameras were tracked (97,159 calls). Presence in the same second as
-# a call, versus that arena's baseline occupancy:
+# where both arenas were filmed (97,159 calls). Presence in the same second as a
+# call, versus that arena's baseline occupancy:
 #
 #                        seen in arena_1   seen in arena_2
 #   call -> arena_1           96.4%             56.3%
@@ -70,10 +70,14 @@ CAMERA_TO_LOCATION = {
     "center": "arena_1",
     "gily_center": "arena_2",
 }
-# The burrow and nest cameras are not tracked, so `underground` has no video
-# coverage at all — occupancy there can only ever be inferred by subtraction.
+# The burrow and nest cameras are not tracked, so `underground` is never filmed —
+# occupancy there can only ever be inferred by subtraction from colony size.
 
 CSV_PATTERN = re.compile(r"^video_(?P<camera>.+)_(?P<file_num>\d+)\.csv$")
+
+DETECTION_COLS = ["exp", "location", "file_num", "frame_id", "det_id", "conf",
+                  "center_x", "center_y", "bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2",
+                  "start_time_real"]
 
 
 def _parse_csv_name(path: Path) -> tuple[str, int] | None:
@@ -84,27 +88,29 @@ def _parse_csv_name(path: Path) -> tuple[str, int] | None:
 
 
 def load_experiment_detections(date_folder: str, exp: int) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Return (detections, coverage) for one experiment."""
+    """Return (detections, files_vetted) for one experiment."""
     folder = video_detections_dir(date_folder, exp)
     if not folder.exists():
         raise FileNotFoundError(f"No tracking output for experiment {exp}: {folder}")
 
     file_to_real, _ = chunk_start_times(exp)
 
-    det_frames, coverage = [], []
+    det_frames, vetted, unmapped = [], [], set()
     for csv_path in sorted(folder.glob("video_*.csv")):
         parsed = _parse_csv_name(csv_path)
         if parsed is None:
             continue
         camera, file_num = parsed
         location = CAMERA_TO_LOCATION.get(camera)
+        if location is None:
+            unmapped.add(camera)
+            continue
         chunk_start = file_to_real.get(file_num)
 
         df = pd.read_csv(csv_path)
-        coverage.append({
+        vetted.append({
             "exp": exp,
             "location": location,
-            "camera": camera,
             "file_num": file_num,
             "chunk_start_real": chunk_start,
             "n_detections": len(df),
@@ -120,34 +126,34 @@ def load_experiment_detections(date_folder: str, exp: int) -> tuple[pd.DataFrame
 
         df["exp"] = exp
         df["location"] = location
-        df["camera"] = camera
         df["file_num"] = file_num
         df["start_time_real"] = chunk_start + pd.to_timedelta(df["frame_id"] / FPS, unit="s")
         det_frames.append(df)
 
-    coverage_df = pd.DataFrame(coverage)
-    if not coverage_df.empty:
+    if unmapped:
+        print(f"    exp {exp}: ignoring cameras with no location mapping: {sorted(unmapped)}")
+
+    vetted_df = pd.DataFrame(vetted)
+    if not vetted_df.empty:
         # nullable Int64, so "no detections" reads as <NA> instead of demoting the
         # whole column to float and showing frame numbers as 10799.0
-        coverage_df["max_frame_id"] = coverage_df["max_frame_id"].astype("Int64")
+        vetted_df["max_frame_id"] = vetted_df["max_frame_id"].astype("Int64")
 
-    cols = ["exp", "location", "camera", "file_num", "frame_id", "det_id", "conf",
-            "center_x", "center_y", "bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2",
-            "start_time_real"]
-    dets = pd.concat(det_frames, ignore_index=True)[cols] if det_frames else pd.DataFrame(columns=cols)
-    return dets, coverage_df
+    dets = (pd.concat(det_frames, ignore_index=True)[DETECTION_COLS] if det_frames
+            else pd.DataFrame(columns=DETECTION_COLS))
+    return dets, vetted_df
 
 
-def write_experiment(date_folder: str, exp: int, skip_existing: bool = False) -> tuple[Path, Path] | None:
-    """Build one experiment's detections.parquet + coverage.parquet."""
+def write_experiment(date_folder: str, exp: int, skip_existing: bool = False) -> tuple[Path, Path]:
+    """Build one experiment's detections.parquet + files_vetted.parquet."""
     folder = video_detections_dir(date_folder, exp)
-    det_path, cov_path = folder / "detections.parquet", folder / "coverage.parquet"
-    if skip_existing and det_path.exists() and cov_path.exists():
-        return det_path, cov_path
-    dets, cov = load_experiment_detections(date_folder, exp)
+    det_path, vetted_path = folder / "detections.parquet", folder / "files_vetted.parquet"
+    if skip_existing and det_path.exists() and vetted_path.exists():
+        return det_path, vetted_path
+    dets, vetted = load_experiment_detections(date_folder, exp)
     dets.to_parquet(det_path, index=False)
-    cov.to_parquet(cov_path, index=False)
-    return det_path, cov_path
+    vetted.to_parquet(vetted_path, index=False)
+    return det_path, vetted_path
 
 
 def pool_date_folder(date_folder: str, skip_existing: bool = False
@@ -158,21 +164,21 @@ def pool_date_folder(date_folder: str, skip_existing: bool = False
         raise FileNotFoundError(f"No tracking output for {date_folder}: {root}")
     exps = sorted(int(p.name) for p in root.iterdir() if p.is_dir() and p.name.isdigit())
 
-    det_frames, cov_frames, failed = [], [], []
+    det_frames, vetted_frames, failed = [], [], []
     for exp in exps:
         try:
-            det_path, cov_path = write_experiment(date_folder, exp, skip_existing)
+            det_path, vetted_path = write_experiment(date_folder, exp, skip_existing)
         except (FileNotFoundError, ValueError) as exc:
             failed.append((exp, str(exc)))
             continue
-        dets, cov = pd.read_parquet(det_path), pd.read_parquet(cov_path)
+        dets, vetted = pd.read_parquet(det_path), pd.read_parquet(vetted_path)
         if not dets.empty:
             det_frames.append(dets)
-        if not cov.empty:
-            cov_frames.append(cov)
+        if not vetted.empty:
+            vetted_frames.append(vetted)
     dets = pd.concat(det_frames, ignore_index=True) if det_frames else pd.DataFrame()
-    cov = pd.concat(cov_frames, ignore_index=True) if cov_frames else pd.DataFrame()
-    return dets, cov, failed
+    vetted = pd.concat(vetted_frames, ignore_index=True) if vetted_frames else pd.DataFrame()
+    return dets, vetted, failed
 
 
 def run(date_folders: list[str], dry_run: bool, skip_existing: bool) -> int:
@@ -185,25 +191,21 @@ def run(date_folders: list[str], dry_run: bool, skip_existing: bool) -> int:
                 print(f"  DRY RUN — would write per-experiment files for {len(exps)} experiments,")
                 print(f"  DRY RUN — then {pooled_detections_path(date_folder)}")
                 continue
-            dets, cov, failed = pool_date_folder(date_folder, skip_existing)
+            dets, vetted, failed = pool_date_folder(date_folder, skip_existing)
         except FileNotFoundError as exc:
             print(f"  {exc}")
             continue
-        if cov.empty:
+        if vetted.empty:
             print("  no tracking CSVs found")
             continue
 
-        n_exps = cov["exp"].nunique()
-        empty = int((cov["n_detections"] == 0).sum())
-        unmapped = sorted(set(cov.loc[cov["location"].isna(), "camera"]))
-        print(f"  {len(dets):,} detections from {n_exps} experiments, {len(cov)} videos")
-        print(f"  videos with zero detections: {empty}/{len(cov)} ({100*empty/len(cov):.0f}%)")
-        print("  per-location coverage:")
-        for (loc, cam), grp in cov.groupby([cov["location"].fillna("(unmapped)"), "camera"]):
-            print(f"    {loc:<12} {cam:<14} {len(grp):4d} videos, "
-                  f"{grp['exp'].nunique():2d} experiments, {int(grp['n_detections'].sum()):,} detections")
-        if unmapped:
-            print(f"  WARNING: cameras with no location mapping: {unmapped}")
+        empty = int((vetted["n_detections"] == 0).sum())
+        print(f"  {len(dets):,} detections from {vetted['exp'].nunique()} experiments, {len(vetted)} videos")
+        print(f"  videos with zero detections: {empty}/{len(vetted)} ({100*empty/len(vetted):.0f}%)")
+        print("  per-location:")
+        for loc, grp in vetted.groupby("location"):
+            print(f"    {loc:<12} {len(grp):4d} videos, {grp['exp'].nunique():2d} experiments, "
+                  f"{int(grp['n_detections'].sum()):,} detections")
         if not dets.empty:
             print(f"  spans {dets['start_time_real'].min()} .. {dets['start_time_real'].max()}")
         if failed:
@@ -211,20 +213,17 @@ def run(date_folders: list[str], dry_run: bool, skip_existing: bool) -> int:
             for exp, reason in failed[:5]:
                 print(f"    {exp}: {reason[:110]}")
 
-        det_path, cov_path = pooled_detections_path(date_folder), pooled_coverage_path(date_folder)
-        if dry_run:
-            print(f"  DRY RUN — would write {det_path} and {cov_path}")
-            continue
+        det_path, vetted_path = pooled_detections_path(date_folder), pooled_files_vetted_path(date_folder)
         dets.to_parquet(det_path, index=False)
-        cov.to_parquet(cov_path, index=False)
+        vetted.to_parquet(vetted_path, index=False)
         print(f"  wrote {det_path}")
-        print(f"  wrote {cov_path}")
+        print(f"  wrote {vetted_path}")
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Pool per-frame detections onto the calls' clock, with a coverage table.",
+        description="Pool per-frame detections onto the calls' clock, with a files_vetted table.",
         epilog="Example: python scripts/pipeline/pool_detections.py --date-folder 2026_02",
     )
     p.add_argument("--date-folder", nargs="+", dest="date_folders",

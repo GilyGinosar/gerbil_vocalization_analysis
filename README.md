@@ -37,12 +37,15 @@ Video/<date>/<exp>/video_<camera>_<file_num>.csv    per-frame detections (tracki
         │
         │  attach exp / location / start_time_real, via the same sync.csv
         ▼   scripts/pipeline/pool_detections.py --date-folder 2026_02
-Video/<date>/<exp>/detections.parquet   + coverage.parquet    per experiment
-Video/<date>/detections_<date>.parquet  + coverage_<date>.parquet   pooled
+Video/<date>/<exp>/detections.parquet   + files_vetted.parquet         per experiment
+Video/<date>/detections_<date>.parquet  + files_vetted_<date>.parquet  pooled
 ```
 
 The video index **is** `file_num`, so a detection and a call from the same moment share
-`start_time_real` and join directly. These are detections, not tracks — no identity across frames,
+`start_time_real` and join directly. Detections use `location` (`arena_1` / `arena_2`), the same
+vocabulary as the calls' `assigned_location`; camera names survive only in the input filenames.
+`files_vetted` records which videos were actually tracked — the word *coverage* is reserved for
+behavioural coverage of the gerbils. These are detections, not tracks — no identity across frames,
 so you can count and place animals but not follow one. Re-run with `--skip-existing` to fold in
 newly tracked experiments without re-reading every CSV.
 
@@ -151,7 +154,7 @@ Some scripts still carry a hardcoded `DATE_FOLDERS` default listing the older co
 | ├ `paths.py` | The data roots and per-experiment path helpers — one place, no per-script copies |
 | ├ `combine_exp_calls.py` / `run_rms_assignment.py` | Drivers that turn DAS output into `<exp>/calls.csv` |
 | ├ `pool_calls.py` | Pools a date folder → ceph CSV + parquet cache |
-| └ `pool_detections.py` | Per-frame animal detections (from the tracking repo) onto the calls' clock: `<exp>/detections.parquet` then `detections_<date>.parquet`, + coverage |
+| └ `pool_detections.py` | Per-frame animal detections (from the tracking repo) onto the calls' clock: `<exp>/detections.parquet` then `detections_<date>.parquet`, + `files_vetted` |
 | `vocalization_analysis/` | The analysis library — imported, never run |
 | ├ `bouts.py` / `acoustic_features.py` / `sync_times.py` | Bout detection · vocalpy features · audio↔wall-clock alignment |
 | └ `calc_transitions.py` | Transition matrices + inter-call-gap helpers. Clean library, but `plot_transition_matrices` alone is 560 of its 919 lines |

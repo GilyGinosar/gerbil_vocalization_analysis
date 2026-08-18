@@ -65,7 +65,7 @@ def video_date_dir(date_folder: str) -> Path:
 
 def video_detections_dir(date_folder: str, exp: int) -> Path:
     """Where one experiment's per-video detection CSVs live, and where its
-    detections.parquet / coverage.parquet are written — the video-side mirror of
+    detections.parquet / files_vetted.parquet are written — the video-side mirror of
     <exp>/calls.csv."""
     return VIDEO_ROOT / date_folder / str(exp)
 
@@ -74,5 +74,7 @@ def pooled_detections_path(date_folder: str) -> Path:
     return video_date_dir(date_folder) / f"detections_{date_folder}.parquet"
 
 
-def pooled_coverage_path(date_folder: str) -> Path:
-    return video_date_dir(date_folder) / f"coverage_{date_folder}.parquet"
+def pooled_files_vetted_path(date_folder: str) -> Path:
+    """Which videos were tracked — named files_vetted, not coverage, because
+    "coverage" is reserved for behavioural coverage of the gerbils."""
+    return video_date_dir(date_folder) / f"files_vetted_{date_folder}.parquet"
