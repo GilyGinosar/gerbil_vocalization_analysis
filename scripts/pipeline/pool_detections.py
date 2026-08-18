@@ -14,9 +14,14 @@ Written per experiment, then pooled per date folder — mirroring how calls.csv
 sits in each experiment folder and all_calls_<date> pools them:
 
     <date>/<exp>/detections.parquet      that experiment's detections, timestamped
-    <date>/<exp>/files_vetted.parquet    one row per video of that experiment
+    <date>/<exp>/files_vetted.csv        one row per video of that experiment
     <date>/detections_<date>.parquet     every experiment concatenated
-    <date>/files_vetted_<date>.parquet   ditto
+    <date>/files_vetted_<date>.csv       ditto
+
+Detections are parquet (millions of rows); files_vetted is CSV, since it is a
+couple of thousand rows and being able to just open it is worth more than the
+format. Read it back with read_files_vetted(), which restores the timestamp and
+integer dtypes that a text round trip drops.
 
 The per-experiment files are the unit of work: pooling is a cheap concat of
 them, so re-running after a few more experiments finish tracking does not
@@ -78,6 +83,19 @@ CSV_PATTERN = re.compile(r"^video_(?P<camera>.+)_(?P<file_num>\d+)\.csv$")
 DETECTION_COLS = ["exp", "location", "file_num", "frame_id", "det_id", "conf",
                   "center_x", "center_y", "bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2",
                   "start_time_real"]
+
+
+def read_files_vetted(path: Path) -> pd.DataFrame:
+    """Read a files_vetted CSV with its dtypes intact.
+
+    CSV loses two things on the round trip: chunk_start_real comes back as text,
+    and max_frame_id becomes float (so <NA> shows up as NaN and 10799 as
+    10799.0). Restore both here so callers never have to think about it.
+    """
+    df = pd.read_csv(path, parse_dates=["chunk_start_real"])
+    if "max_frame_id" in df.columns:
+        df["max_frame_id"] = df["max_frame_id"].astype("Int64")
+    return df
 
 
 def _parse_csv_name(path: Path) -> tuple[str, int] | None:
@@ -147,12 +165,12 @@ def load_experiment_detections(date_folder: str, exp: int) -> tuple[pd.DataFrame
 def write_experiment(date_folder: str, exp: int, skip_existing: bool = False) -> tuple[Path, Path]:
     """Build one experiment's detections.parquet + files_vetted.parquet."""
     folder = video_detections_dir(date_folder, exp)
-    det_path, vetted_path = folder / "detections.parquet", folder / "files_vetted.parquet"
+    det_path, vetted_path = folder / "detections.parquet", folder / "files_vetted.csv"
     if skip_existing and det_path.exists() and vetted_path.exists():
         return det_path, vetted_path
     dets, vetted = load_experiment_detections(date_folder, exp)
     dets.to_parquet(det_path, index=False)
-    vetted.to_parquet(vetted_path, index=False)
+    vetted.to_csv(vetted_path, index=False)
     return det_path, vetted_path
 
 
@@ -171,7 +189,7 @@ def pool_date_folder(date_folder: str, skip_existing: bool = False
         except (FileNotFoundError, ValueError) as exc:
             failed.append((exp, str(exc)))
             continue
-        dets, vetted = pd.read_parquet(det_path), pd.read_parquet(vetted_path)
+        dets, vetted = pd.read_parquet(det_path), read_files_vetted(vetted_path)
         if not dets.empty:
             det_frames.append(dets)
         if not vetted.empty:
@@ -215,7 +233,7 @@ def run(date_folders: list[str], dry_run: bool, skip_existing: bool) -> int:
 
         det_path, vetted_path = pooled_detections_path(date_folder), pooled_files_vetted_path(date_folder)
         dets.to_parquet(det_path, index=False)
-        vetted.to_parquet(vetted_path, index=False)
+        vetted.to_csv(vetted_path, index=False)
         print(f"  wrote {det_path}")
         print(f"  wrote {vetted_path}")
     return 0

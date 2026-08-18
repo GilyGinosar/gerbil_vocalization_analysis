@@ -76,5 +76,9 @@ def pooled_detections_path(date_folder: str) -> Path:
 
 def pooled_files_vetted_path(date_folder: str) -> Path:
     """Which videos were tracked — named files_vetted, not coverage, because
-    "coverage" is reserved for behavioural coverage of the gerbils."""
-    return video_date_dir(date_folder) / f"files_vetted_{date_folder}.parquet"
+    "coverage" is reserved for behavioural coverage of the gerbils.
+
+    CSV rather than parquet: it is a couple of thousand rows, so it costs ~100 KB
+    and reads faster than parquet, and it opens directly in an editor.
+    """
+    return video_date_dir(date_folder) / f"files_vetted_{date_folder}.csv"
