@@ -30,6 +30,22 @@ all_calls/all_calls_<date>.csv
 all_calls/parquet_cache/all_calls_<date>.parquet       ← what every analysis script reads
 ```
 
+Video runs alongside, and lands on the same clock:
+
+```
+Video/<date>/<exp>/video_<camera>_<file_num>.csv    per-frame detections (tracking repo)
+        │
+        │  attach exp / location / start_time_real, via the same sync.csv
+        ▼   scripts/pipeline/pool_detections.py --date-folder 2026_02
+Video/<date>/<exp>/detections.parquet   + coverage.parquet    per experiment
+Video/<date>/detections_<date>.parquet  + coverage_<date>.parquet   pooled
+```
+
+The video index **is** `file_num`, so a detection and a call from the same moment share
+`start_time_real` and join directly. These are detections, not tracks — no identity across frames,
+so you can count and place animals but not follow one. Re-run with `--skip-existing` to fold in
+newly tracked experiments without re-reading every CSV.
+
 **A date folder (`2026_02`) is one continuous, weeks-long experiment on one gerbil family.**
 The numbered `experiment_<id>` folders inside it are just recording restarts — not conditions.
 Always analyse at the date-folder level, using `start_time_real`.
@@ -135,7 +151,7 @@ Some scripts still carry a hardcoded `DATE_FOLDERS` default listing the older co
 | ├ `paths.py` | The data roots and per-experiment path helpers — one place, no per-script copies |
 | ├ `combine_exp_calls.py` / `run_rms_assignment.py` | Drivers that turn DAS output into `<exp>/calls.csv` |
 | ├ `pool_calls.py` | Pools a date folder → ceph CSV + parquet cache |
-| └ `pool_detections.py` | Pools per-frame animal detections (from the tracking repo) onto the calls' clock, + a coverage table |
+| └ `pool_detections.py` | Per-frame animal detections (from the tracking repo) onto the calls' clock: `<exp>/detections.parquet` then `detections_<date>.parquet`, + coverage |
 | `vocalization_analysis/` | The analysis library — imported, never run |
 | ├ `bouts.py` / `acoustic_features.py` / `sync_times.py` | Bout detection · vocalpy features · audio↔wall-clock alignment |
 | └ `calc_transitions.py` | Transition matrices + inter-call-gap helpers. Clean library, but `plot_transition_matrices` alone is 560 of its 919 lines |

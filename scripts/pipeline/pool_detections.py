@@ -10,10 +10,17 @@ There is no tracker, so `det_id` is an index within its frame and says nothing
 about identity across frames — you can count animals and locate them, but you
 cannot follow an individual.
 
-Two files are written:
+Written per experiment, then pooled per date folder — mirroring how calls.csv
+sits in each experiment folder and all_calls_<date> pools them:
 
-    detections_<date>.parquet   one row per detection, plus start_time_real
-    coverage_<date>.parquet     one row per (exp, location, file_num) video
+    <date>/<exp>/detections.parquet     that experiment's detections, timestamped
+    <date>/<exp>/coverage.parquet       one row per video of that experiment
+    <date>/detections_<date>.parquet    every experiment concatenated
+    <date>/coverage_<date>.parquet      ditto
+
+The per-experiment files are the unit of work: pooling is a cheap concat of
+them, so re-running after a few more experiments finish tracking does not
+re-read every CSV (see --skip-existing).
 
 The coverage table exists because a detections table alone cannot distinguish
 "nobody was visible" from "that video was never tracked" — both are simply
@@ -33,7 +40,12 @@ from pathlib import Path
 import pandas as pd
 
 from scripts.pipeline.audio_processing_config import list_date_folders
-from scripts.pipeline.paths import DETECTIONS_DIR, video_detections_dir
+from scripts.pipeline.paths import (
+    pooled_coverage_path,
+    pooled_detections_path,
+    video_date_dir,
+    video_detections_dir,
+)
 from scripts.pipeline.pool_calls import chunk_start_times
 
 FPS = 30.0  # OUTPUT_FORMAT.md: seconds = frame_id / FPS
@@ -120,8 +132,22 @@ def load_experiment_detections(date_folder: str, exp: int) -> tuple[pd.DataFrame
     return dets, pd.DataFrame(coverage)
 
 
-def pool_date_folder(date_folder: str) -> tuple[pd.DataFrame, pd.DataFrame, list[tuple[int, str]]]:
-    root = video_detections_dir(date_folder, 0).parent
+def write_experiment(date_folder: str, exp: int, skip_existing: bool = False) -> tuple[Path, Path] | None:
+    """Build one experiment's detections.parquet + coverage.parquet."""
+    folder = video_detections_dir(date_folder, exp)
+    det_path, cov_path = folder / "detections.parquet", folder / "coverage.parquet"
+    if skip_existing and det_path.exists() and cov_path.exists():
+        return det_path, cov_path
+    dets, cov = load_experiment_detections(date_folder, exp)
+    dets.to_parquet(det_path, index=False)
+    cov.to_parquet(cov_path, index=False)
+    return det_path, cov_path
+
+
+def pool_date_folder(date_folder: str, skip_existing: bool = False
+                     ) -> tuple[pd.DataFrame, pd.DataFrame, list[tuple[int, str]]]:
+    """Write every experiment's files, then concatenate them for the date folder."""
+    root = video_date_dir(date_folder)
     if not root.exists():
         raise FileNotFoundError(f"No tracking output for {date_folder}: {root}")
     exps = sorted(int(p.name) for p in root.iterdir() if p.is_dir() and p.name.isdigit())
@@ -129,10 +155,11 @@ def pool_date_folder(date_folder: str) -> tuple[pd.DataFrame, pd.DataFrame, list
     det_frames, cov_frames, failed = [], [], []
     for exp in exps:
         try:
-            dets, cov = load_experiment_detections(date_folder, exp)
+            det_path, cov_path = write_experiment(date_folder, exp, skip_existing)
         except (FileNotFoundError, ValueError) as exc:
             failed.append((exp, str(exc)))
             continue
+        dets, cov = pd.read_parquet(det_path), pd.read_parquet(cov_path)
         if not dets.empty:
             det_frames.append(dets)
         if not cov.empty:
@@ -142,11 +169,17 @@ def pool_date_folder(date_folder: str) -> tuple[pd.DataFrame, pd.DataFrame, list
     return dets, cov, failed
 
 
-def run(date_folders: list[str], out_dir: Path, dry_run: bool) -> int:
+def run(date_folders: list[str], dry_run: bool, skip_existing: bool) -> int:
     for date_folder in date_folders:
         print(f"\n=== {date_folder}")
         try:
-            dets, cov, failed = pool_date_folder(date_folder)
+            if dry_run:
+                root = video_date_dir(date_folder)
+                exps = sorted(int(q.name) for q in root.iterdir() if q.is_dir() and q.name.isdigit())
+                print(f"  DRY RUN — would write per-experiment files for {len(exps)} experiments,")
+                print(f"  DRY RUN — then {pooled_detections_path(date_folder)}")
+                continue
+            dets, cov, failed = pool_date_folder(date_folder, skip_existing)
         except FileNotFoundError as exc:
             print(f"  {exc}")
             continue
@@ -172,12 +205,10 @@ def run(date_folders: list[str], out_dir: Path, dry_run: bool) -> int:
             for exp, reason in failed[:5]:
                 print(f"    {exp}: {reason[:110]}")
 
-        det_path = out_dir / f"detections_{date_folder}.parquet"
-        cov_path = out_dir / f"coverage_{date_folder}.parquet"
+        det_path, cov_path = pooled_detections_path(date_folder), pooled_coverage_path(date_folder)
         if dry_run:
             print(f"  DRY RUN — would write {det_path} and {cov_path}")
             continue
-        out_dir.mkdir(parents=True, exist_ok=True)
         dets.to_parquet(det_path, index=False)
         cov.to_parquet(cov_path, index=False)
         print(f"  wrote {det_path}")
@@ -192,15 +223,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--date-folder", nargs="+", dest="date_folders",
                    help="Date folder(s). Default: every folder in experiments.toml.")
-    p.add_argument("--out-dir", type=Path, default=DETECTIONS_DIR,
-                   help=f"Where the parquets go. Default: {DETECTIONS_DIR}")
+    p.add_argument("--skip-existing", action="store_true",
+                   help="Reuse an experiment's detections.parquet if it already exists "
+                        "(incremental re-pool after more experiments finish tracking).")
     p.add_argument("--dry-run", action="store_true")
     return p
 
 
 def main() -> int:
     args = build_parser().parse_args()
-    return run(args.date_folders or list_date_folders(), args.out_dir, args.dry_run)
+    return run(args.date_folders or list_date_folders(), args.dry_run, args.skip_existing)
 
 
 if __name__ == "__main__":

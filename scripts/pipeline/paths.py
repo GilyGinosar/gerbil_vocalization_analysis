@@ -28,8 +28,6 @@ PARQUET_DIR = ALL_CALLS_DIR / "parquet_cache"
 # Per-frame animal detections from the Gerbil-Detection-and-Tracking repo.
 # See its OUTPUT_FORMAT.md for the CSV contract.
 VIDEO_ROOT = PROCESSED_ROOT / "Video"
-# Pooled, timestamped detections + coverage (written by pool_detections.py).
-DETECTIONS_DIR = VIDEO_ROOT / "pooled"
 
 
 def experiment_audio_dir(exp: int) -> Path:
@@ -59,6 +57,22 @@ def list_experiment_ids_for_date(date_folder: str) -> list[int]:
     return sorted(int(p.name) for p in folder.iterdir() if p.is_dir() and p.name.isdigit())
 
 
+def video_date_dir(date_folder: str) -> Path:
+    """<VIDEO_ROOT>/<date folder>/ — holds one folder per experiment, plus the
+    date-level artefacts (arena calibration, previews, pooled detections)."""
+    return VIDEO_ROOT / date_folder
+
+
 def video_detections_dir(date_folder: str, exp: int) -> Path:
-    """Where the per-video detection CSVs for one experiment live."""
+    """Where one experiment's per-video detection CSVs live, and where its
+    detections.parquet / coverage.parquet are written — the video-side mirror of
+    <exp>/calls.csv."""
     return VIDEO_ROOT / date_folder / str(exp)
+
+
+def pooled_detections_path(date_folder: str) -> Path:
+    return video_date_dir(date_folder) / f"detections_{date_folder}.parquet"
+
+
+def pooled_coverage_path(date_folder: str) -> Path:
+    return video_date_dir(date_folder) / f"coverage_{date_folder}.parquet"
