@@ -36,6 +36,91 @@ Always analyse at the date-folder level, using `start_time_real`.
 
 ---
 
+## Starting a new date folder
+
+In order. Steps 2–7 are re-run as more experiments finish concatenating — the raw data usually
+arrives in batches, so expect several passes.
+
+**1. Declare it.** Add a block to [scripts/pipeline/experiments.toml](scripts/pipeline/experiments.toml).
+This is the only file that needs editing; nothing else knows about date folders.
+
+```toml
+[date_folders.2026_08]
+experiments = "741-815"      # ranges and single ids: "741-760, 785, 790"
+skip        = [783, 784]     # optional
+```
+
+A range wider than what exists is fine — only ids you actually process are touched. The file is
+validated on load, so an overlap with another folder or a stray `skip` id fails loudly.
+
+**2. See what's ready to average.** Only experiments with a `concatenated_data_cam_mic_sync/`
+folder can be processed; the rest are still upstream.
+
+```bash
+B=/mnt/home/neurostatslab/ceph/saneslab_data/big_setup
+for e in $(seq 741 815); do
+  [ -r "$B/experiment_$e/concatenated_data_cam_mic_sync/sync.csv" ] && echo -n "$e "
+done; echo
+```
+
+Note that `big_setup` is shared — some `experiment_*` folders belong to other people, and some are
+unreadable while still being written.
+
+**3. Average the mic pairs.** Put the ready ids in `--array` in
+[slurm/average-audio-array.sh](slurm/average-audio-array.sh) — the array index *is* the experiment
+id, so `squeue` and the logs are labelled by experiment — then:
+
+```bash
+sbatch slurm/average-audio-array.sh
+squeue -u $USER -n average-audio
+```
+
+**4. Check it landed.** Each experiment should have 3 averaged wavs per raw chunk
+(`channel_{10,20,30}_file_NNN.wav`), plus `file_times.csv` and a copied experiment log:
+
+```bash
+ls .../Processed_data/Audio/2026_08/785/Averaged_wavs_w_annotations | wc -l
+```
+
+[check_audio_processing_consistency.ipynb](notebooks/ops/check_audio_processing_consistency.ipynb)
+audits this against the raw channel pairs for every experiment at once.
+
+**5. Record the cohort's light cycle — do not skip this.**
+[light_cycle.py](scripts/utils/light_cycle.py) falls back to `(8, 20)` for any unknown date folder
+**without warning**, which silently mislabels day/night in every circadian figure. The copied
+experiment logs are the source: `grep -i "light\|dark" .../2026_08/*/experiment_*_log_*.txt`.
+While you're there, add any notable events (a litter born, a manipulation) to `EVENTS_BY_DATE` in
+[ethogram_io.py](scripts/utils/ethogram_io.py).
+
+**6. Run DAS** (external to this repo) over
+`Audio/<date>/<exp>/Averaged_wavs_w_annotations/`, producing
+`calls_confident/<params>/*_accepted_calls.csv`. Track which experiments are done with
+[find_das_completed_experiments.ipynb](notebooks/ops/find_das_completed_experiments.ipynb).
+
+**7. Build the call tables.**
+
+```bash
+python scripts/pipeline/combine_exp_calls.py --date-folder 2026_08   # -> <exp>/calls.csv
+python scripts/pipeline/pool_calls.py        --date-folder 2026_08   # -> ceph CSV + parquet
+```
+
+`combine_exp_calls` assigns each call to an arena straight from its DAS channel, which assumes no
+acoustic leakage between arenas; use `run_rms_assignment.py` instead if that doesn't hold. Both
+skip experiments whose DAS output is missing and say which, so running them early is harmless.
+`pool_calls` rewrites the pooled CSV and parquet from scratch each time, so just run it again after
+a new batch.
+
+**8. Analyse.** Every script takes the date folder by name:
+
+```bash
+python scripts/analysis/run_ethogram_categorical.py --dates 2026_08
+```
+
+Some scripts still carry a hardcoded `DATE_FOLDERS` default listing the older cohorts — pass
+`--dates` explicitly, or add the new folder to that list.
+
+---
+
 ## Where things live
 
 | Path | What's in it |
