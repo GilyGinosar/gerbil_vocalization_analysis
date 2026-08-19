@@ -27,10 +27,15 @@ The per-experiment files are the unit of work: pooling is a cheap concat of
 them, so re-running after a few more experiments finish tracking does not
 re-read every CSV (see --skip-existing).
 
-Detections carry a `stationary` flag: True where the detector locked onto a fixed
-object rather than an animal. Filter it out for occupancy (`det[~det.stationary]`).
-The tracking repo computes this upstream; where it has not yet, we fall back to a
-coarser local rule and record which in `files_vetted.stationary_source`.
+**Pooling drops the artifacts.** Detections the detector locked onto a fixed object
+(a piece of plastic in arena_2, 13% of its rows in 2026_02) carry a `stationary`
+flag. The per-experiment files keep every row and the flag, as the audit trail;
+the pooled file is the analysis-facing one and has them removed, so nothing
+downstream has to remember a filter. `--keep-stationary` turns that off.
+
+How many were dropped per video is in `files_vetted.n_stationary`, and which rule
+produced the flag in `files_vetted.stationary_source` (`detector` = the tracking
+repo's, `fallback` = our coarser one for experiments it has not reached).
 
 `files_vetted` records which videos were actually looked at. A detections table
 alone cannot tell "nobody was visible" from "that video was never tracked" —
@@ -161,6 +166,7 @@ def load_experiment_detections(date_folder: str, exp: int,
             "file_num": file_num,
             "chunk_start_real": chunk_start,
             "n_detections": len(df),
+            "n_stationary": int(df["stationary"].sum()) if "stationary" in df.columns else 0,
             "max_frame_id": int(df["frame_id"].max()) if len(df) else pd.NA,
             "has_video": csv_path.with_suffix(".mp4").exists(),
             "in_sync_csv": chunk_start is not None,
@@ -241,7 +247,16 @@ def pool_date_folder(date_folder: str, skip_existing: bool = False
     return dets, vetted, failed
 
 
-def run(date_folders: list[str], dry_run: bool, skip_existing: bool) -> int:
+def drop_stationary(dets: pd.DataFrame) -> pd.DataFrame:
+    """Remove the detector's fixed-object detections and the now-useless column."""
+    if "stationary" not in dets.columns:
+        return dets
+    clean = dets[~dets["stationary"]]
+    return clean.drop(columns=["stationary"])
+
+
+def run(date_folders: list[str], dry_run: bool, skip_existing: bool,
+        keep_stationary: bool = False) -> int:
     for date_folder in date_folders:
         print(f"\n=== {date_folder}")
         try:
@@ -279,6 +294,12 @@ def run(date_folders: list[str], dry_run: bool, skip_existing: bool) -> int:
             for exp, reason in failed[:5]:
                 print(f"    {exp}: {reason[:110]}")
 
+        if not keep_stationary:
+            before = len(dets)
+            dets = drop_stationary(dets)
+            print(f"  dropped {before - len(dets):,} stationary detections "
+                  f"({100*(before-len(dets))/max(before,1):.1f}%) -> {len(dets):,} in the pooled file")
+
         det_path, vetted_path = pooled_detections_path(date_folder), pooled_files_vetted_path(date_folder)
         dets.to_parquet(det_path, index=False)
         vetted.to_csv(vetted_path, index=False)
@@ -297,13 +318,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--skip-existing", action="store_true",
                    help="Reuse an experiment's detections.parquet if it already exists "
                         "(incremental re-pool after more experiments finish tracking).")
+    p.add_argument("--keep-stationary", action="store_true",
+                   help="Keep the detector's fixed-object detections in the pooled file "
+                        "(they are always kept in the per-experiment files).")
     p.add_argument("--dry-run", action="store_true")
     return p
 
 
 def main() -> int:
     args = build_parser().parse_args()
-    return run(args.date_folders or list_date_folders(), args.dry_run, args.skip_existing)
+    return run(args.date_folders or list_date_folders(), args.dry_run, args.skip_existing,
+               args.keep_stationary)
 
 
 if __name__ == "__main__":

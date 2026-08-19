@@ -37,15 +37,21 @@ Video/<date>/<exp>/video_<camera>_<file_num>.csv    per-frame detections (tracki
         │
         │  attach exp / location / start_time_real, via the same sync.csv
         ▼   scripts/pipeline/pool_detections.py --date-folder 2026_02
-Video/<date>/<exp>/detections.parquet   + files_vetted.parquet         per experiment
-Video/<date>/detections_<date>.parquet  + files_vetted_<date>.parquet  pooled
+Video/<date>/<exp>/detections.parquet   + files_vetted.csv   per experiment, EVERY row
+        │
+        │  drop detections the detector locked onto a fixed object
+        │  (`stationary`; ~7% of 2026_02 — a piece of plastic in arena_2)
+        ▼
+Video/<date>/detections_<date>.parquet  + files_vetted_<date>.csv   pooled, analysis-ready
 ```
 
 The video index **is** `file_num`, so a detection and a call from the same moment share
 `start_time_real` and join directly. Detections use `location` (`arena_1` / `arena_2`), the same
 vocabulary as the calls' `assigned_location`; camera names survive only in the input filenames.
 `files_vetted` records which videos were actually tracked — the word *coverage* is reserved for
-behavioural coverage of the gerbils. These are detections, not tracks — no identity across frames,
+behavioural coverage of the gerbils. It also carries `n_stationary` (how many artifact rows that
+video contributed) and `stationary_source` (`detector` = the tracking repo's flag, `fallback` = our
+coarser rule for experiments it has not reached yet). These are detections, not tracks — no identity across frames,
 so you can count and place animals but not follow one. Re-run with `--skip-existing` to fold in
 newly tracked experiments without re-reading every CSV.
 
@@ -132,7 +138,17 @@ skip experiments whose DAS output is missing and say which, so running them earl
 `pool_calls` rewrites the pooled CSV and parquet from scratch each time, so just run it again after
 a new batch.
 
-**8. Analyse.** Every script takes the date folder by name:
+**8. Pool the video, if the tracking repo has run on this cohort.**
+
+```bash
+python scripts/pipeline/pool_detections.py --date-folder 2026_08 --skip-existing
+```
+
+This both puts detections on the calls' clock **and drops the detector's fixed-object detections**,
+so the pooled file is analysis-ready. The per-experiment files keep every row if you need to audit
+what was removed; `files_vetted.n_stationary` counts it per video.
+
+**9. Analyse.** Every script takes the date folder by name:
 
 ```bash
 python scripts/analysis/run_ethogram_categorical.py --dates 2026_08

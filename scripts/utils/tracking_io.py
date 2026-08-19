@@ -4,9 +4,9 @@ The video-side counterpart of ``ethogram_io`` for calls. Use this rather than
 reading the parquet directly, because two mistakes are easy to make and silent:
 
 1. **Stationary detections.** The detector locks onto fixed objects (a piece of
-   plastic in arena_2 accounts for 13% of its detections in 2026_02). They are
-   flagged, not deleted, so a plain ``read_parquet`` hands them to you. This
-   module drops them by default.
+   plastic in arena_2). ``pool_detections`` already removes them from the *pooled*
+   file, so it is clean whatever you use to read it. The *per-experiment* files
+   deliberately keep them as an audit trail, so this module drops them there.
 2. **Untracked videos.** "Nobody visible" and "we never looked" are both absent
    rows in the detections. ``filmed_minutes`` builds the list of minutes that
    were actually filmed, so a quiet minute counts as zero and an untracked one
@@ -50,8 +50,8 @@ def load_detections(date_folder: str, exp: int | None = None,
 
     Pass ``include_stationary=True`` only to inspect the artifact itself.
     """
-    if columns is not None and "stationary" not in columns:
-        columns = list(columns) + ["stationary"]
+    if columns is not None and exp is not None and "stationary" not in columns:
+        columns = list(columns) + ["stationary"]     # per-experiment files still carry it
 
     # One experiment at a time reads its own small file; the pooled one is tens of
     # millions of rows and will exhaust memory if you hold it and a copy.
@@ -66,7 +66,8 @@ def load_detections(date_folder: str, exp: int | None = None,
     if "location" in detections.columns:
         detections["location"] = detections["location"].astype("category")
 
-    if include_stationary:
+    if include_stationary or "stationary" not in detections.columns:
+        # The pooled file has no `stationary` column: pooling already dropped them.
         return detections
 
     n_before = len(detections)
