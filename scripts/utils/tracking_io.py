@@ -1,0 +1,139 @@
+"""Loading the pooled tracking data, with its traps already handled.
+
+The video-side counterpart of ``ethogram_io`` for calls. Use this rather than
+reading the parquet directly, because two mistakes are easy to make and silent:
+
+1. **Stationary detections.** The detector locks onto fixed objects (a piece of
+   plastic in arena_2 accounts for 13% of its detections in 2026_02). They are
+   flagged, not deleted, so a plain ``read_parquet`` hands them to you. This
+   module drops them by default.
+2. **Untracked videos.** "Nobody visible" and "we never looked" are both absent
+   rows in the detections. ``filmed_minutes`` builds the list of minutes that
+   were actually filmed, so a quiet minute counts as zero and an untracked one
+   does not count at all.
+"""
+from __future__ import annotations
+
+import pandas as pd
+
+from scripts.pipeline.paths import (pooled_detections_path, pooled_files_vetted_path,
+                                    video_detections_dir)
+from scripts.pipeline.pool_detections import read_files_vetted
+
+FPS = 30
+FRAMES_PER_MINUTE = FPS * 60
+VIDEO_MINUTES = 6                      # each recording chunk covers 6 minutes
+
+
+def load_files_vetted(date_folder: str) -> pd.DataFrame:
+    """One row per video that was tracked."""
+    return read_files_vetted(pooled_files_vetted_path(date_folder))
+
+
+def experiments_in(date_folder: str) -> list[int]:
+    """Experiment ids with pooled detections, oldest first."""
+    return sorted(load_files_vetted(date_folder).exp.unique().tolist())
+
+
+def load_detections(date_folder: str, exp: int | None = None,
+                    include_stationary: bool = False,
+                    columns: list[str] | None = None, location: str | None = None,
+                    quiet: bool = False) -> pd.DataFrame:
+    """Pooled detections for a date folder, stationary ones removed by default.
+
+    Pass ``location="arena_1"`` to read only that arena — the filter is pushed down
+    to the file, so it halves the memory instead of loading everything first.
+    These files are tens of millions of rows; ask for the columns you need.
+
+    Pass ``exp=`` to read a single experiment's file instead of the pooled one —
+    much lighter, and the right choice inside a loop.
+
+    Pass ``include_stationary=True`` only to inspect the artifact itself.
+    """
+    if columns is not None and "stationary" not in columns:
+        columns = list(columns) + ["stationary"]
+
+    # One experiment at a time reads its own small file; the pooled one is tens of
+    # millions of rows and will exhaust memory if you hold it and a copy.
+    if exp is None:
+        path = pooled_detections_path(date_folder)
+    else:
+        path = video_detections_dir(date_folder, exp) / "detections.parquet"
+
+    filters = [("location", "==", location)] if location else None
+    detections = pd.read_parquet(path, columns=columns, filters=filters)
+    # a handful of repeated strings: category costs a fraction of the memory
+    if "location" in detections.columns:
+        detections["location"] = detections["location"].astype("category")
+
+    if include_stationary:
+        return detections
+
+    n_before = len(detections)
+    detections = detections[~detections["stationary"]]
+
+    if not quiet:
+        dropped = n_before - len(detections)
+        print(f"{date_folder}: {len(detections):,} detections "
+              f"({dropped:,} stationary dropped, {100*dropped/max(n_before,1):.1f}%)")
+        warn_about_fallback(date_folder)
+
+    return detections
+
+
+def warn_about_fallback(date_folder: str) -> None:
+    """Say which experiments still use our coarser stationary rule.
+
+    The tracking repo computes the flag properly; until it has reached every
+    experiment, the rest fall back to a local rule that under-flags. Those
+    experiments are usable but provisional.
+    """
+    vetted = load_files_vetted(date_folder)
+    if "stationary_source" not in vetted.columns:
+        return
+    fallback = vetted[vetted.stationary_source == "fallback"]
+    if len(fallback):
+        exps = sorted(fallback.exp.unique())
+        print(f"  note: {len(exps)} experiment(s) still use the fallback flag and are "
+              f"under-flagged: {exps}")
+
+
+def filmed_minutes(date_folder: str, exp: int | None = None) -> pd.DataFrame:
+    """Every (location, minute) that was actually filmed.
+
+    Merge occupancy onto this so a filmed-but-quiet minute is a real zero, and an
+    untracked minute is simply absent rather than a fake zero.
+    """
+    vetted = load_files_vetted(date_folder)
+    if exp is not None:
+        vetted = vetted[vetted.exp == exp]
+
+    rows = []
+    for video in vetted.itertuples():
+        for minute in range(VIDEO_MINUTES):
+            rows.append({"exp": video.exp,
+                         "location": video.location,
+                         "minute": video.chunk_start_real.floor("1min") + pd.Timedelta(minutes=minute)})
+    return pd.DataFrame(rows).drop_duplicates()
+
+
+def animals_per_minute(date_folder: str, exp: int | None = None) -> pd.DataFrame:
+    """Mean animals visible per frame, for each location and minute.
+
+    Zero where the video was tracked and nobody was seen; absent where untracked.
+    """
+    detections = load_detections(date_folder, quiet=True)
+    if exp is not None:
+        detections = detections[detections.exp == exp]
+
+    detections = detections.copy()
+    detections["minute"] = detections["start_time_real"].dt.floor("1min")
+
+    counted = detections.groupby(["exp", "location", "minute"]).size().reset_index(name="n_detections")
+    counted["animals"] = counted["n_detections"] / FRAMES_PER_MINUTE
+
+    table = filmed_minutes(date_folder, exp).merge(
+        counted[["exp", "location", "minute", "animals"]],
+        on=["exp", "location", "minute"], how="left")
+    table["animals"] = table["animals"].fillna(0)
+    return table
