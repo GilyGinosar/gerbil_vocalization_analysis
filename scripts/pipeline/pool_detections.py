@@ -27,10 +27,10 @@ The per-experiment files are the unit of work: pooling is a cheap concat of
 them, so re-running after a few more experiments finish tracking does not
 re-read every CSV (see --skip-existing).
 
-Detections carry a `stationary` flag: True where the exact coordinate recurs
-1000+ times within an experiment+location, which means the detector locked onto a
-fixed object rather than an animal. Filter it out for occupancy
-(`det[~det.stationary]`); it is 19.9% of arena_2 in 2026_02.
+Detections carry a `stationary` flag: True where the detector locked onto a fixed
+object rather than an animal. Filter it out for occupancy (`det[~det.stationary]`).
+The tracking repo computes this upstream; where it has not yet, we fall back to a
+coarser local rule and record which in `files_vetted.stationary_source`.
 
 `files_vetted` records which videos were actually looked at. A detections table
 alone cannot tell "nobody was visible" from "that video was never tracked" —
@@ -89,12 +89,16 @@ DETECTION_COLS = ["exp", "location", "file_num", "frame_id", "det_id", "conf",
                   "center_x", "center_y", "bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2",
                   "start_time_real", "stationary"]
 
-# A detection is marked `stationary` when its exact (center_x, center_y) recurs at
-# least this often within one experiment+location. At 30 fps that is ~33 s at an
-# identical sub-millimetre point, which an animal cannot do — it is the detector
-# locking onto an object. In 2026_02 this is a piece of plastic a gerbil dragged
-# into arena_2 on 2026-02-22, and it accounts for 19.9% of that arena's detections
-# (68.5% in exp 508). Flagged, never dropped: the caller decides.
+# `stationary` marks a detection the detector locked onto a fixed object rather
+# than an animal — in 2026_02, a piece of plastic a gerbil dragged into arena_2.
+#
+# The tracking repo now computes this upstream (bbox identity over a >=60 s span)
+# and ships it as a column, so we use theirs when it is there. Experiments it has
+# not reached yet fall back to the rule below: the exact (center_x, center_y)
+# recurring 1000+ times within an experiment and location, which at 30 fps is ~33 s
+# at an identical sub-millimetre point. The fallback agrees with upstream on
+# 97-99% of detections but misses faint objects, so `files_vetted.stationary_source`
+# records which one produced each row. Flagged, never dropped.
 STATIONARY_REPEATS = 1000
 
 
@@ -135,6 +139,7 @@ def load_experiment_detections(date_folder: str, exp: int,
     file_to_real, _ = chunk_start_times(exp)
 
     det_frames, vetted, unmapped = [], [], set()
+    upstream_flag = False
     for csv_path in sorted(folder.glob("video_*.csv")):
         parsed = _parse_csv_name(csv_path)
         if parsed is None:
@@ -147,6 +152,9 @@ def load_experiment_detections(date_folder: str, exp: int,
         chunk_start = file_to_real.get(file_num)
 
         df = pd.read_csv(csv_path)
+        if "stationary" in df.columns:
+            df["stationary"] = df["stationary"].astype(bool)
+            upstream_flag = True
         vetted.append({
             "exp": exp,
             "location": location,
@@ -172,18 +180,26 @@ def load_experiment_detections(date_folder: str, exp: int,
     if unmapped:
         print(f"    exp {exp}: ignoring cameras with no location mapping: {sorted(unmapped)}")
 
+    # Build the detections first, so we know which flag source was used.
+    if det_frames:
+        dets = pd.concat(det_frames, ignore_index=True)
+        if upstream_flag:
+            source = "detector"                  # the tracking repo's own flag
+        else:
+            dets["stationary"] = flag_stationary(dets, stationary_repeats)
+            source = "fallback"                  # our coarser rule, until upstream catches up
+        dets = dets[DETECTION_COLS]
+    else:
+        dets = pd.DataFrame(columns=DETECTION_COLS)
+        source = "no detections"
+
     vetted_df = pd.DataFrame(vetted)
     if not vetted_df.empty:
+        vetted_df["stationary_source"] = source
         # nullable Int64, so "no detections" reads as <NA> instead of demoting the
         # whole column to float and showing frame numbers as 10799.0
         vetted_df["max_frame_id"] = vetted_df["max_frame_id"].astype("Int64")
 
-    if det_frames:
-        dets = pd.concat(det_frames, ignore_index=True)
-        dets["stationary"] = flag_stationary(dets, stationary_repeats)
-        dets = dets[DETECTION_COLS]
-    else:
-        dets = pd.DataFrame(columns=DETECTION_COLS)
     return dets, vetted_df
 
 
@@ -250,6 +266,8 @@ def run(date_folders: list[str], dry_run: bool, skip_existing: bool) -> int:
             st = dets.groupby("location")["stationary"].mean()
             print("  flagged `stationary` (detector stuck on an object): "
                   + ", ".join(f"{k} {100*v:.1f}%" for k, v in st.items()))
+            by_source = vetted.groupby("stationary_source")["exp"].nunique().to_dict()
+            print(f"  stationary flag source, experiments: {by_source}")
         print("  per-location:")
         for loc, grp in vetted.groupby("location"):
             print(f"    {loc:<12} {len(grp):4d} videos, {grp['exp'].nunique():2d} experiments, "
