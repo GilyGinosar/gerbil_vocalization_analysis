@@ -21,6 +21,7 @@ reading the parquet directly, because two mistakes are easy to make and silent:
 """
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 from scripts.pipeline.paths import (pooled_detections_path, pooled_files_vetted_path,
@@ -29,7 +30,11 @@ from scripts.pipeline.pool_detections import read_files_vetted
 
 FPS = 30
 FRAMES_PER_MINUTE = FPS * 60
-VIDEO_MINUTES = 6                      # each recording chunk covers 6 minutes
+NOMINAL_VIDEO_SECONDS = 360            # a recording chunk is 6 minutes...
+                                       # ...except the LAST of each experiment, which runs until
+                                       # recording stopped and can be hours long (up to 4.7 h in
+                                       # 2026_02). Assuming 360 s there undercounts observed time
+                                       # and silently drops the detections in the tail.
 
 
 def load_files_vetted(date_folder: str) -> pd.DataFrame:
@@ -106,22 +111,43 @@ def warn_about_fallback(date_folder: str) -> None:
               f"under-flagged: {exps}")
 
 
-def filmed_minutes(date_folder: str, exp: int | None = None) -> pd.DataFrame:
-    """Every (location, minute) that was actually filmed.
+def video_durations(date_folder: str, exp: int | None = None) -> pd.DataFrame:
+    """How long each video actually ran, in seconds.
 
-    Merge occupancy onto this so a filmed-but-quiet minute is a real zero, and an
-    untracked minute is simply absent rather than a fake zero.
+    Measured, not assumed: the gap to the next chunk of the same experiment and
+    location. The final chunk has no next one, so it falls back to its last
+    detected frame, which is a lower bound but far better than 360 s.
     """
     vetted = load_files_vetted(date_folder)
     if exp is not None:
         vetted = vetted[vetted.exp == exp]
 
+    vetted = vetted.sort_values(["exp", "location", "file_num"]).copy()
+    next_start = vetted.groupby(["exp", "location"], observed=True)["chunk_start_real"].shift(-1)
+    vetted["duration_s"] = (next_start - vetted["chunk_start_real"]).dt.total_seconds()
+
+    # final chunk of each experiment: use the last frame we saw an animal in
+    from_frames = (vetted["max_frame_id"].astype("Float64") + 1) / FPS
+    vetted["duration_s"] = vetted["duration_s"].fillna(from_frames.astype(float))
+    vetted["duration_s"] = vetted["duration_s"].fillna(NOMINAL_VIDEO_SECONDS)
+    vetted.loc[vetted.duration_s < NOMINAL_VIDEO_SECONDS, "duration_s"] = NOMINAL_VIDEO_SECONDS
+    return vetted
+
+
+def filmed_minutes(date_folder: str, exp: int | None = None) -> pd.DataFrame:
+    """Every (exp, location, minute) that was actually filmed.
+
+    Merge occupancy onto this so a filmed-but-quiet minute is a real zero, and an
+    untracked minute is simply absent rather than a fake zero.
+    """
     rows = []
-    for video in vetted.itertuples():
-        for minute in range(VIDEO_MINUTES):
+    for video in video_durations(date_folder, exp).itertuples():
+        minutes = int(np.ceil(video.duration_s / 60))
+        start = video.chunk_start_real.floor("1min")
+        for minute in range(minutes):
             rows.append({"exp": video.exp,
                          "location": video.location,
-                         "minute": video.chunk_start_real.floor("1min") + pd.Timedelta(minutes=minute)})
+                         "minute": start + pd.Timedelta(minutes=minute)})
     return pd.DataFrame(rows).drop_duplicates()
 
 
@@ -147,3 +173,26 @@ def animals_per_minute(date_folder: str, exp: int | None = None) -> pd.DataFrame
         on=["exp", "location", "minute"], how="left")
     table["animals"] = table["animals"].fillna(0)
     return table
+
+
+# --- the reduced behavioural tables (built by scripts/pipeline/build_behaviour.py) ---
+#
+# Cohort-wide behaviour cannot hold the raw detections (~260 MB per experiment),
+# but it does not need them: counts per second and per place are ~10 MB for a
+# whole date folder. Load these instead, and keep the raw files for the analyses
+# that really are per experiment, such as neural recordings.
+
+def load_behaviour_seconds(date_folder: str) -> pd.DataFrame:
+    """One row per (exp, location, filmed second): n_detections, animals, n_calls.
+
+    Re-bin to whatever resolution you want, e.g.
+        seconds.groupby([seconds.second.dt.floor("1min"), "location"]).agg(...)
+    """
+    from scripts.pipeline.build_behaviour import seconds_path
+    return pd.read_parquet(seconds_path(date_folder))
+
+
+def load_occupancy_cells(date_folder: str) -> pd.DataFrame:
+    """One row per (exp, location, 2 cm cell): animal_seconds spent there."""
+    from scripts.pipeline.build_behaviour import cells_path
+    return pd.read_parquet(cells_path(date_folder))
