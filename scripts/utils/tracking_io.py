@@ -7,7 +7,14 @@ reading the parquet directly, because two mistakes are easy to make and silent:
    plastic in arena_2). ``pool_detections`` already removes them from the *pooled*
    file, so it is clean whatever you use to read it. The *per-experiment* files
    deliberately keep them as an audit trail, so this module drops them there.
-2. **Untracked videos.** "Nobody visible" and "we never looked" are both absent
+2. **Size.** The pooled file is tens of millions of rows and a JupyterHub session
+   here gets 16 GB, so loading it whole leaves little room. **Work one experiment
+   at a time** — ``load_detections(date, exp=...)`` reads that experiment's own
+   small file — and aggregate the small results. That is also the right unit
+   scientifically: occupancy drifts between experiments, so a rate map's
+   denominator has to come from the same experiment as its events.
+
+3. **Untracked videos.** "Nobody visible" and "we never looked" are both absent
    rows in the detections. ``filmed_minutes`` builds the list of minutes that
    were actually filmed, so a quiet minute counts as zero and an untracked one
    does not count at all.
@@ -123,14 +130,16 @@ def animals_per_minute(date_folder: str, exp: int | None = None) -> pd.DataFrame
 
     Zero where the video was tracked and nobody was seen; absent where untracked.
     """
-    detections = load_detections(date_folder, quiet=True)
-    if exp is not None:
-        detections = detections[detections.exp == exp]
-
+    # Read only what we need: with exp= this is one experiment's small file, not
+    # the pooled 26M-row one. Loading the pooled file per experiment in a loop is
+    # what used to exhaust the 16 GB the JupyterHub job allows.
+    detections = load_detections(date_folder, exp=exp, quiet=True,
+                                 columns=["exp", "location", "start_time_real"])
     detections = detections.copy()
     detections["minute"] = detections["start_time_real"].dt.floor("1min")
 
-    counted = detections.groupby(["exp", "location", "minute"]).size().reset_index(name="n_detections")
+    counted = (detections.groupby(["exp", "location", "minute"], observed=True)
+                     .size().reset_index(name="n_detections"))
     counted["animals"] = counted["n_detections"] / FRAMES_PER_MINUTE
 
     table = filmed_minutes(date_folder, exp).merge(
