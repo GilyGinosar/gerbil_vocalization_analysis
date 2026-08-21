@@ -177,7 +177,7 @@ Some scripts still carry a hardcoded `DATE_FOLDERS` default listing the older co
 | `scripts/analysis/` | Data-*consuming* figures and models. One script per question → see index below |
 | `scripts/analysis/exploratory/` | Probes kept because committed scripts still import from them; not maintained |
 | `scripts/utils/` | `ethogram_io` (**the shared loader — 14 scripts use it**), `light_cycle`, `spectrogram_viz`, `export_sync_tidy` |
-| `scripts/video/` | `sync_video_spectrogram` (camera + spectrogram mp4), `play_spectrogram` (audio only) |
+| `scripts/video/` | `sync_video_spectrogram` (camera + spectrogram mp4), `play_spectrogram` (audio only), `burrow_transit_picker` (tunnel spectrogram over the transit frame strip, for curating crossings) |
 | `notebooks/` | All notebooks — see the index below. `ops/` = run-when-needed utilities, `archive/` = superseded, `legacy/` = pre-DAS relics |
 | `slurm/` | sbatch array driver for the averaging step |
 | `exports/` `figures/` `videos/` | Local outputs — **gitignored**, all regenerable |
@@ -185,6 +185,13 @@ Some scripts still carry a hardcoded `DATE_FOLDERS` default listing the older co
 ---
 
 ## Analysis scripts, by question
+
+### Do gerbils call when they enter or leave the nest?
+| Script | Question |
+|---|---|
+| [run_transit_calls.py](scripts/analysis/run_transit_calls.py) | PSTH of calls around tunnel crossings, split by direction (up to the arena / down to the nest) and by where the call was placed, against a within-file shuffle null |
+| [burrow_transit_picker.py](scripts/video/burrow_transit_picker.py) | Not a figure — the eyeball/curation tool. Tunnel spectrogram + DAS call ribbon over the 5-frame strip, one card per crossing. `--layout fixed` (default) puts every card on the same time scale so 52 crossings are comparable; `--layout eventspan` shares an exact axis with the frames instead |
+| [rank_transit_calls.py](scripts/analysis/rank_transit_calls.py) | Reading order for the picker — which crossings have calling concentrated *in* the crossing rather than around it. Counts only, no stats |
 
 ### Is calling rhythmic? (circadian / ultradian / bursty)
 | Script | Question |
@@ -312,9 +319,17 @@ Every script picks its ceph vs. SMB base path automatically from `platform.syste
 - **Per-location rates conflate calling with occupancy.** A quiet burrow may just be an empty
   burrow. Treat location splits as exploratory until video tracking lets you divide by occupancy.
   The whole-colony rhythm and the newborn-litter surge don't depend on this.
-- **Audio and video clock-*drift* apart** (~0.07%, audio runs fast) in
-  `concatenated_data_cam_mic_sync`. It is not a constant offset. `sync_video_spectrogram`
-  computes the ratio from ffprobe durations; anything else combining audio + video must too.
+- **Audio and video clock-*drift* apart** in `concatenated_data_cam_mic_sync`, and by how much
+  is **per experiment, not a constant**: 0.07% on experiment 237 (a quarter-second over a 360 s
+  file), but only 2.5 ppm on experiment 492. It is not a constant offset either. Measure the ratio
+  from the file pair's own durations, as `sync_video_spectrogram` and `burrow_transit_picker` do;
+  never assume a number.
+- **Raw mic channels are 0-based, and only 0-5 carry the arena mics.** The dumps hold
+  `channel_00` .. `channel_20`, but `get_channel_mapping` wires only {0,1} → underground,
+  {2,3} → arena_1, {4,5} → arena_2 (for experiments ≥ 272; the first two groups swap below that).
+  Within the underground pair, **channel 01 is the tunnel mic** — measured on experiment 492's
+  curated crossings, in-transit RMS rises +7.2 dB on ch01 versus +2.9 dB on ch00 and ~0 dB on
+  every arena mic.
 - **Not all acoustic features are equal.** `peak_freq` and `max_pitch` are trustworthy on gerbil
   USVs; entropy / FM / goodness are noisy because YIN drops out on fast frequency sweeps.
 - **Log-binned histograms need `density=True`** — and for heavy-tailed data, prefer

@@ -24,8 +24,10 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from scripts.pipeline.paths import (pooled_detections_path, pooled_files_vetted_path,
-                                    video_detections_dir)
+from scipy.io import wavfile
+
+from scripts.pipeline.paths import (AUDIO_ROOT, pooled_detections_path,
+                                    pooled_files_vetted_path, video_detections_dir)
 from scripts.pipeline.pool_detections import read_files_vetted
 
 FPS = 30
@@ -134,15 +136,50 @@ def video_durations(date_folder: str, exp: int | None = None) -> pd.DataFrame:
     return vetted
 
 
-def filmed_minutes(date_folder: str, exp: int | None = None) -> pd.DataFrame:
-    """Every (exp, location, minute) that was actually filmed.
+def audio_duration_s(date_folder: str, exp: int, file_num: int) -> float:
+    """Length of the averaged wav for one chunk, or NaN if there is none."""
+    wav = (AUDIO_ROOT / date_folder / str(exp) / "Averaged_wavs_w_annotations"
+           / f"channel_10_file_{file_num:03d}.wav")
+    if not wav.exists():
+        return float("nan")
+    fs, data = wavfile.read(wav, mmap=True)
+    return len(data) / fs
 
-    Merge occupancy onto this so a filmed-but-quiet minute is a real zero, and an
-    untracked minute is simply absent rather than a fake zero.
+
+def synced_durations(date_folder: str, exp: int | None = None) -> pd.DataFrame:
+    """Video durations with the audio length beside them, and the overlap.
+
+    The final chunk of an experiment is not synchronised: video keeps recording
+    for hours while audio stops after a couple of minutes (11.9 h of video with
+    no audio in 2026_02). Anything that counts calls must use `synced_s`, or it
+    credits occupancy with time in which no call could ever be detected.
+    Video-only work (occupancy maps, spacing) can use the full `duration_s`.
     """
+    videos = video_durations(date_folder, exp).copy()
+    videos["audio_s"] = [audio_duration_s(date_folder, int(r.exp), int(r.file_num))
+                         for r in videos.itertuples()]
+    videos["synced_s"] = videos[["duration_s", "audio_s"]].min(axis=1)
+    videos["synced_s"] = videos["synced_s"].fillna(videos["duration_s"])
+    return videos
+
+
+def filmed_minutes(date_folder: str, exp: int | None = None,
+                   require_audio: bool = True) -> pd.DataFrame:
+    """Every (exp, location, minute) that was actually observed.
+
+    Merge occupancy onto this so an observed-but-quiet minute is a real zero, and
+    an unobserved minute is simply absent rather than a fake zero.
+
+    ``require_audio=True`` (the default) stops at the point audio stopped, because
+    a minute with video but no audio can never contain a call — counting it would
+    drag any call rate down. Pass False for video-only work such as occupancy
+    maps, which can use all 417 h rather than the 392 h that have both.
+    """
+    durations = synced_durations(date_folder, exp) if require_audio else video_durations(date_folder, exp)
+    column = "synced_s" if require_audio else "duration_s"
     rows = []
-    for video in video_durations(date_folder, exp).itertuples():
-        minutes = int(np.ceil(video.duration_s / 60))
+    for video in durations.itertuples():
+        minutes = int(np.ceil(getattr(video, column) / 60))
         start = video.chunk_start_real.floor("1min")
         for minute in range(minutes):
             rows.append({"exp": video.exp,
@@ -151,10 +188,13 @@ def filmed_minutes(date_folder: str, exp: int | None = None) -> pd.DataFrame:
     return pd.DataFrame(rows).drop_duplicates()
 
 
-def animals_per_minute(date_folder: str, exp: int | None = None) -> pd.DataFrame:
+def animals_per_minute(date_folder: str, exp: int | None = None,
+                       require_audio: bool = True) -> pd.DataFrame:
     """Mean animals visible per frame, for each location and minute.
 
     Zero where the video was tracked and nobody was seen; absent where untracked.
+    Defaults to minutes that have audio too, so the table can be merged with calls
+    safely — see filmed_minutes.
     """
     # Read only what we need: with exp= this is one experiment's small file, not
     # the pooled 26M-row one. Loading the pooled file per experiment in a loop is
@@ -168,7 +208,7 @@ def animals_per_minute(date_folder: str, exp: int | None = None) -> pd.DataFrame
                      .size().reset_index(name="n_detections"))
     counted["animals"] = counted["n_detections"] / FRAMES_PER_MINUTE
 
-    table = filmed_minutes(date_folder, exp).merge(
+    table = filmed_minutes(date_folder, exp, require_audio).merge(
         counted[["exp", "location", "minute", "animals"]],
         on=["exp", "location", "minute"], how="left")
     table["animals"] = table["animals"].fillna(0)
