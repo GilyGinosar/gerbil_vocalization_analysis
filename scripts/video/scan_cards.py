@@ -30,44 +30,56 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.pipeline.paths import BASE_RAW  # noqa: E402
 from scripts.video.burrow_scan import AFTER_S, BEFORE_S, TILE_FPS, TILE_W  # noqa: E402
 from scripts.video.burrow_transit_picker import (  # noqa: E402
+    t_to_x,
     HTML_HEAD, HTML_TAIL, annotate_spectrogram, audio_path, file_index, mark_crossing,
     read_window, spectrogram_tile, time_axis, video_duration, write_html,
 )
 
 PX_PER_S = TILE_W * TILE_FPS      # the strips were cached at this scale
-POS_H = 70                        # px for the position trace
+
+
+def shade(tile, t0, t1, a, b, reverse, delta):
+    """Tint the span [a, b] of the card."""
+    width = tile.shape[1]
+    xa, xb = sorted((t_to_x(a, t0, t1, width, reverse), t_to_x(b, t0, t1, width, reverse)))
+    xa, xb = max(0, xa), min(width, xb)
+    if xb <= xa:
+        return
+    lifted = tile[:, xa:xb].astype(np.int16) + np.array(delta, np.int16)
+    tile[:, xa:xb] = np.clip(lifted, 0, 255).astype(np.uint8)
+
+
 GUIDE_KHZ = 15                    # movement noise below here, calls above
 
 
-def position_trace(track: pd.DataFrame, t0: float, t1: float, width: int,
-                   left: float, right: float, reverse: bool) -> np.ndarray:
-    """The animal's x through the tunnel, at full 30 fps, on the card's time axis.
+def presence_span(track: pd.DataFrame, entry: float, exit_: float) -> tuple[float, float]:
+    """When the animal was in the tunnel at all, around this traverse.
 
-    The frame strip samples at 2 fps because each tile costs half a second of
-    width. The track has every frame and costs nothing, so this shows the actual
-    trajectory -- and the landmark crossings become visible as the curve cutting
-    the two guide lines, instead of something you take on trust.
+    The 0.15/0.75 landmarks are where the measurement is trustworthy -- a body
+    CENTROID cannot reach the crop edges, so wider landmarks detect almost
+    nothing (0.05 is reached in 0.2% of frames). But the animal is in the tube
+    for longer than the span between them, and that longer stretch is a real
+    quantity: the contiguous run of single-animal frames containing the
+    traverse. Shading it gives the eye the whole passage without pretending the
+    landmarks are somewhere they are not.
     """
-    from scripts.video.burrow_transit_picker import t_to_x
-    strip = np.full((POS_H, width, 3), 18, np.uint8)
-    for level, label in ((left, "0.15 nest"), (right, "0.75 arena")):
-        y = int(POS_H * (1 - level))
-        for x in range(0, width, 12):
-            cv2.line(strip, (x, y), (min(x + 6, width), y), (70, 110, 70), 1)
-        cv2.putText(strip, label, (4 if not reverse else width - 78, y - 3),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.32, (90, 140, 90), 1)
-    window = track[(track.frame >= t0 * 30) & (track.frame <= t1 * 30)]
-    previous = None
-    for frame, n_animals, x in zip(window.frame, window.n_animals, window.x):
-        if n_animals != 1 or not np.isfinite(x):
-            previous = None
-            continue
-        px = t_to_x(frame / 30.0, t0, t1, width, reverse)
-        py = int(POS_H * (1 - float(x)))
-        if previous is not None:
-            cv2.line(strip, previous, (px, py), (255, 220, 120), 2)
-        previous = (px, py)
-    return strip
+    single = track[(track.n_animals == 1) & track.x.notna()].frame.to_numpy()
+    if not len(single):
+        return entry, exit_
+    a, b = int(entry * 30), int(exit_ * 30)
+    inside = single[(single >= a) & (single <= b)]
+    if not len(inside):
+        return entry, exit_
+    first, last = inside[0], inside[-1]
+    while first - 1 in set(single[(single > first - 40) & (single < first)]):
+        first -= 1
+    prev = single[single < first]
+    while len(prev) and first - prev[-1] == 1:
+        first = prev[-1]; prev = prev[:-1]
+    nxt = single[single > last]
+    while len(nxt) and nxt[0] - last == 1:
+        last = nxt[0]; nxt = nxt[1:]
+    return first / 30.0, last / 30.0
 
 
 def main() -> None:
@@ -129,11 +141,12 @@ def main() -> None:
 
         audio, fs = read_window(audio_path(datadir, args.channel, index), t0, t1, drift, 0.0)
         spec = spectrogram_tile(audio, fs, width, reverse)
+        # light tone = animal in the tunnel; strong tone + green lines = the traverse
+        out = float(row["t_out"])
+        shade(spec, t0, t1, entry, out, reverse, (26, 10, 0))
         annotate_spectrogram(spec, t0, t1, entry, exit_, reverse)
-        mark_crossing(spec, t0, t1, entry, exit_, BEFORE_S, ("enters", "arrives"), reverse)
+        mark_crossing(spec, t0, t1, entry, out, BEFORE_S, ("enters", "out of tunnel"), reverse)
         axis = time_axis(width, t0, t1, entry, reverse)
-        track = pd.read_parquet(scan / "tracks" / f"{Path(row['video']).stem}.parquet")
-        trace = position_trace(track, t0, t1, width, args.left, args.right, reverse)
         # a guide line where movement noise ends and calls begin
         y = int(spec.shape[0] * (1 - (GUIDE_KHZ * 1000 - 500) / (45000 - 500)))
         overlay = spec.copy()
@@ -142,13 +155,16 @@ def main() -> None:
         cv2.putText(spec, f"{GUIDE_KHZ} kHz", (width - 60, y - 4),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.32, (200, 200, 200), 1)
 
-        ok, buf = cv2.imencode(".jpg", cv2.vconcat([spec, trace, strip, axis]),
+        ok, buf = cv2.imencode(".jpg", cv2.vconcat([spec, strip, axis]),
                                [cv2.IMWRITE_JPEG_QUALITY, 82])
         if not ok:
             continue
         flag = "" if row["single_animal"].lower() == "true" else "  [>1 animal]"
+        if row.get("still_in_tunnel_at_cap", "").lower() == "true":
+            flag += "  [still in tunnel at +5s cap]"
         label = (f"{row['video']}  t={entry:.2f}s  {row['direction']}  "
-                 f"traverse {float(row['traverse_s']):.1f}s  window {t1 - t0:.1f}s{flag}")
+                 f"traverse {float(row['traverse_s']):.1f}s  in tunnel "
+                 f"{out - entry:.1f}s  window {t1 - t0:.1f}s{flag}")
         cards.append((row["direction"], f"{row['video']}|{entry:.2f}",
                       "data:image/jpeg;base64," + base64.b64encode(buf).decode(), label))
 

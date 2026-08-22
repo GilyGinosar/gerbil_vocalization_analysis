@@ -70,9 +70,22 @@ def filmed_seconds(date_folder: str) -> pd.DataFrame:
     return pd.DataFrame(rows).drop_duplicates()
 
 
+def usable_chunks(date_folder: str, exp: int) -> set[tuple]:
+    """(location, file_num) of this experiment's chunks that survived vetting."""
+    vetted = load_files_vetted(date_folder)          # rejected chunks already removed
+    vetted = vetted[vetted.exp == exp]
+    return set(zip(vetted.location, vetted.file_num))
+
+
 def detections_per_second(date_folder: str, exp: int) -> pd.DataFrame:
+    # The per-experiment files keep every row as an audit trail, including the
+    # chunks pooling rejected, so filter them here or they come back in.
+    keep = usable_chunks(date_folder, exp)
     detections = load_detections(date_folder, exp=exp, quiet=True,
-                                 columns=["exp", "location", "start_time_real"])
+                                 columns=["exp", "location", "file_num", "start_time_real"])
+    if not detections.empty:
+        detections = detections[[(l, f) in keep for l, f
+                                 in zip(detections.location, detections.file_num)]]
     if detections.empty:
         return pd.DataFrame(columns=["exp", "location", "second", "n_detections"])
     detections = detections.copy()
@@ -93,8 +106,12 @@ def calls_per_second(exp: int) -> pd.DataFrame:
 
 def occupancy_cells(date_folder: str, exp: int) -> pd.DataFrame:
     """Animal-seconds per 2 cm cell, for one experiment and each location."""
+    keep = usable_chunks(date_folder, exp)
     detections = load_detections(date_folder, exp=exp, quiet=True,
-                                 columns=["location", "center_x", "center_y"])
+                                 columns=["location", "file_num", "center_x", "center_y"])
+    if not detections.empty:
+        detections = detections[[(l, f) in keep for l, f
+                                 in zip(detections.location, detections.file_num)]]
     rows = []
     for location, points in detections.groupby("location", observed=True):
         counts, _, _ = np.histogram2d(points.center_x, points.center_y,

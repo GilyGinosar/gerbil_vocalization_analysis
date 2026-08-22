@@ -39,9 +39,19 @@ NOMINAL_VIDEO_SECONDS = 360            # a recording chunk is 6 minutes...
                                        # and silently drops the detections in the tail.
 
 
-def load_files_vetted(date_folder: str) -> pd.DataFrame:
-    """One row per video that was tracked."""
-    return read_files_vetted(pooled_files_vetted_path(date_folder))
+def load_files_vetted(date_folder: str, include_unsynced: bool = False) -> pd.DataFrame:
+    """One row per video that was tracked.
+
+    Chunks whose video and audio disagree on length are excluded by default: the
+    cameras kept rolling for hours after the audio stopped, so they carry video
+    that no call could accompany. `pool_detections` already leaves them out of the
+    pooled detections; this keeps every other consumer consistent with that.
+    Pass include_unsynced=True to audit what was rejected.
+    """
+    vetted = read_files_vetted(pooled_files_vetted_path(date_folder))
+    if include_unsynced or "synced" not in vetted.columns:
+        return vetted
+    return vetted[vetted["synced"]]
 
 
 def experiments_in(date_folder: str) -> list[int]:

@@ -60,6 +60,8 @@ BG_SAMPLE = 10          # every Nth frame builds the background median
 DIFF_THRESH = 25        # per-pixel change counted as motion (audit column only)
 MAX_TRAVERSE_S = 60.0   # refuse to pair landmark crossings further apart than this
 MULTI_FRAC = 0.25       # traverse dropped if this fraction of its frames has >1 animal
+MAX_LINGER_S = 5.0      # how long to wait for the tunnel to empty after the far landmark
+EMPTY_FRAMES = 5        # frames of empty tunnel that count as "the animal is out"
 TILE_FPS = 2            # cached strip frame rate
 TILE_W = 300
 BEFORE_S, AFTER_S = 2.0, 1.0
@@ -152,7 +154,31 @@ def find_traverses(track: pd.DataFrame, left: float, right: float) -> list[dict]
     return traverses
 
 
-def strip_for(frames: list[np.ndarray], t_entry: float, t_exit: float,
+def tunnel_empty_after(track: pd.DataFrame, exit_s: float) -> tuple[float, bool]:
+    """When the animal is out of the tunnel after crossing the far landmark.
+
+    The far landmark is where the measurement is trustworthy, but it is not when
+    the animal leaves -- it still has the last stretch of tube to cover. This
+    returns the first sustained empty-tunnel moment, which is the behaviourally
+    meaningful end of the passage.
+
+    Capped at MAX_LINGER_S: the tail is long (p90 ~10 s, and one animal stayed
+    115 s), and an uncapped window would make a card tens of thousands of pixels
+    wide. The second return value says whether the cap bit -- i.e. the animal was
+    still in the tunnel when we stopped waiting.
+    """
+    n = track.n_animals.to_numpy()
+    start = int(exit_s * 30)
+    limit = min(len(n), start + int(MAX_LINGER_S * 30))
+    run = 0
+    for frame in range(start, limit):
+        run = run + 1 if n[frame] == 0 else 0
+        if run >= EMPTY_FRAMES:
+            return (frame - EMPTY_FRAMES + 1) / 30.0, False
+    return exit_s + MAX_LINGER_S, True
+
+
+def strip_for(n_frames: int, t_entry: float, t_exit: float,
               roi, full: Path) -> np.ndarray | None:
     """The cached frame strip for one traverse, at TILE_FPS."""
     x1, y1, x2, y2 = roi
@@ -163,7 +189,7 @@ def strip_for(frames: list[np.ndarray], t_entry: float, t_exit: float,
     position = 0
     for t in times:
         target = int(round(t * FPS))
-        if target < 0 or target >= len(frames):
+        if target < 0 or target >= n_frames:
             tiles.append(np.zeros((tile_h, TILE_W, 3), np.uint8))
             continue
         if target < position or target - position > 250:
@@ -205,18 +231,21 @@ def scan_video(video: Path, roi, left: float, right: float, out_dir: Path,
 
     rows = []
     for traverse in find_traverses(track, left, right):
+        t_out, capped = tunnel_empty_after(track, traverse["t_exit"])
         window = track[(track.frame >= traverse["t_entry"] * FPS)
                        & (track.frame <= traverse["t_exit"] * FPS)]
         multi = float((window.n_animals > 1).mean()) if len(window) else 0.0
         still = float((window.moved < 250).mean()) if len(window) else 0.0
         row = {"video": video.name, **traverse,
+               "t_out": round(t_out, 4), "still_in_tunnel_at_cap": capped,
+               "exit_to_out_s": round(t_out - traverse["t_exit"], 3),
                "multi_animal_frac": round(multi, 3),
                "still_frac": round(still, 3),
                "single_animal": multi < MULTI_FRAC,
                "occupied_frac": round(occupied, 3),
                "bg_fingerprint": round(fingerprint, 4)}
         if want_tiles and row["single_animal"]:
-            strip = strip_for(frames, traverse["t_entry"], traverse["t_exit"], roi, video)
+            strip = strip_for(len(frames), traverse["t_entry"], t_out, roi, video)
             if strip is not None:
                 (out_dir / "tiles").mkdir(parents=True, exist_ok=True)
                 name = f"{video.stem}_t{traverse['t_entry']:.2f}".replace(".", "_") + ".jpg"
@@ -225,6 +254,43 @@ def scan_video(video: Path, roi, left: float, right: float, out_dir: Path,
                 row["tile"] = f"tiles/{name}"
         rows.append(row)
     print(f"{video.name}: {len(rows)} traverses, {occupied:.0%} occupied", flush=True)
+    return rows
+
+
+def retile(video: Path, track_path: Path, roi, left: float, right: float,
+           out_dir: Path) -> list[dict]:
+    """Redo traverses and cached strips from an existing track -- no full decode.
+
+    Detection and the landmark times come from the track, which is already on
+    disk; only the frame strips need pixels, and those are pulled by seeking. So
+    changing the card window costs a few minutes of seeks rather than a
+    re-decode of every frame.
+    """
+    track = pd.read_parquet(track_path)
+    n_frames = len(track)
+    occupied = float((track.n_animals > 0).mean())
+    rows = []
+    for traverse in find_traverses(track, left, right):
+        t_out, capped = tunnel_empty_after(track, traverse["t_exit"])
+        window = track[(track.frame >= traverse["t_entry"] * FPS)
+                       & (track.frame <= traverse["t_exit"] * FPS)]
+        multi = float((window.n_animals > 1).mean()) if len(window) else 0.0
+        still = float((window.moved < 250).mean()) if len(window) else 0.0
+        row = {"video": video.name, **traverse,
+               "t_out": round(t_out, 4), "still_in_tunnel_at_cap": capped,
+               "exit_to_out_s": round(t_out - traverse["t_exit"], 3),
+               "multi_animal_frac": round(multi, 3), "still_frac": round(still, 3),
+               "single_animal": multi < MULTI_FRAC,
+               "occupied_frac": round(occupied, 3), "bg_fingerprint": ""}
+        if row["single_animal"]:
+            strip = strip_for(n_frames, traverse["t_entry"], t_out, roi, video)
+            if strip is not None:
+                (out_dir / "tiles").mkdir(parents=True, exist_ok=True)
+                name = f"{video.stem}_t{traverse['t_entry']:.2f}".replace(".", "_") + ".jpg"
+                cv2.imwrite(str(out_dir / "tiles" / name), strip, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                row["tile"] = f"tiles/{name}"
+        rows.append(row)
+    print(f"{video.name}: {len(rows)} traverses (retile)", flush=True)
     return rows
 
 
@@ -240,6 +306,9 @@ def main() -> None:
     parser.add_argument("--right", type=float, default=RIGHT)
     parser.add_argument("--no-tiles", action="store_true", help="skip the cached frame strips")
     parser.add_argument("--limit", type=int, help="only the first N videos (for a trial run)")
+    parser.add_argument("--retile", action="store_true",
+                        help="reuse the tracks already on disk and only redo traverses + "
+                             "cached strips (minutes, not a full re-decode)")
     args = parser.parse_args()
 
     roi = tuple(int(v) for v in args.roi.split(","))
@@ -257,11 +326,19 @@ def main() -> None:
 
     rows = []
     for video in videos:
-        rows.extend(scan_video(video, roi, args.left, args.right, out_dir, not args.no_tiles))
+        if args.retile:
+            track_path = out_dir / "tracks" / f"{video.stem}.parquet"
+            if not track_path.exists():
+                print(f"{video.name}: no track yet, skipping")
+                continue
+            rows.extend(retile(video, track_path, roi, args.left, args.right, out_dir))
+        else:
+            rows.extend(scan_video(video, roi, args.left, args.right, out_dir, not args.no_tiles))
 
     suffix = f"_{Path(args.video).stem}" if args.video else ""
     path = out_dir / f"traverses{suffix}.csv"
-    fields = ["video", "direction", "t_entry", "t_exit", "traverse_s", "multi_animal_frac",
+    fields = ["video", "direction", "t_entry", "t_exit", "t_out", "exit_to_out_s",
+              "still_in_tunnel_at_cap", "traverse_s", "multi_animal_frac",
               "still_frac", "single_animal", "occupied_frac", "bg_fingerprint", "tile"]
     with open(path, "w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
