@@ -112,6 +112,7 @@ def build_sheets(cards: list[dict], out_dir: Path, per_sheet: int, quality: int,
         # widest member, so without this one 28 s traverse makes an 18000 px page
         # on which every other card is mostly padding.
         pages, page = [], []
+        side = ("right" if direction == "to_nest" else "left") if align == "auto" else align
         for card in group:
             wide = max([card["image"].shape[1]] + [c["image"].shape[1] for c in page])
             if page and (len(page) >= per_sheet or wide > max_width):
@@ -134,7 +135,7 @@ def build_sheets(cards: list[dict], out_dir: Path, per_sheet: int, quality: int,
                     # Pad on the side away from t=0 so the anchor column stays put.
                     # Left-to-right cards start at t0, so t=0 is a fixed offset from
                     # the LEFT and they pad right; right-to-left cards are the mirror.
-                    image = (cv2.hconcat([pad, image]) if align == "right"
+                    image = (cv2.hconcat([pad, image]) if side == "right"
                              else cv2.hconcat([image, pad]))   # change the card's time scale
                 pieces.append(caption(width, f"[{position}/{len(group)}] {card['label']}",
                                       card["calls"]))
@@ -162,10 +163,12 @@ def main() -> None:
     parser.add_argument("--sort", choices=("calls", "width"), default="calls",
                         help="order cards within a direction. 'width' groups similar-length "
                              "traverses together so one long card cannot stretch a whole sheet.")
-    parser.add_argument("--align", choices=("left", "right"), default="left",
+    parser.add_argument("--align", choices=("left", "right", "auto"), default="left",
                         help="which edge to line the cards up on. Use 'right' for cards built "
                              "with --reverse-time, whose t=0 is measured from the right edge; "
-                             "otherwise the anchor column drifts card to card.")
+                             "otherwise the anchor column drifts card to card. 'auto' picks per "
+                             "direction: to_nest cards are drawn right-to-left, so they align "
+                             "right; everything else aligns left.")
     args = parser.parse_args()
 
     cards = read_cards(Path(args.picker))

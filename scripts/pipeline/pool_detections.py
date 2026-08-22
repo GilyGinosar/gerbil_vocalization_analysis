@@ -211,7 +211,7 @@ def load_experiment_detections(date_folder: str, exp: int,
             "chunk_start_real": chunk_start,
             "n_detections": len(df),
             "n_stationary": int(df["stationary"].sum()) if "stationary" in df.columns else 0,
-            "video_s": (int(df["frame_id"].max()) + 1) / FPS if len(df) else float("nan"),
+            "last_detected_s": (int(df["frame_id"].max()) + 1) / FPS if len(df) else float("nan"),
             "audio_s": audio_seconds(date_folder, exp, file_num, wav_format),
             "max_frame_id": int(df["frame_id"].max()) if len(df) else pd.NA,
             "has_video": csv_path.with_suffix(".mp4").exists(),
@@ -248,7 +248,16 @@ def load_experiment_detections(date_folder: str, exp: int,
     vetted_df = pd.DataFrame(vetted)
     if not vetted_df.empty:
         vetted_df["stationary_source"] = source
-        # a chunk is usable only if its streams agree on how long it was
+        # How long the video ran: the gap to the next chunk of the same location.
+        # Measured this way it is known even for a video with no detections in it,
+        # unlike the last-detected-frame, which is only a lower bound. The final
+        # chunk has no next one, so there it falls back to the last detected frame.
+        vetted_df = vetted_df.sort_values(["location", "file_num"])
+        next_start = vetted_df.groupby("location", observed=True)["chunk_start_real"].shift(-1)
+        vetted_df["video_s"] = (next_start - vetted_df["chunk_start_real"]).dt.total_seconds()
+        vetted_df["video_s"] = vetted_df["video_s"].fillna(vetted_df["last_detected_s"])
+
+        # A chunk is usable only if its streams agree on how long it was.
         overrun = vetted_df["video_s"] - vetted_df["audio_s"]
         vetted_df["synced"] = ~(overrun > AUDIO_VIDEO_TOLERANCE_S)
         # nullable Int64, so "no detections" reads as <NA> instead of demoting the
