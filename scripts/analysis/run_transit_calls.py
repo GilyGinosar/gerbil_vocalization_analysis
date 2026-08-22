@@ -73,6 +73,29 @@ CALL_TYPES = ["high-freq", "warble", "alarm", "stacks", "newborn"]
 N_SHUFFLES = 1000
 
 
+def read_landmarks(path: Path) -> list[dict]:
+    """Clean single-animal traverses from burrow_landmarks.py, as anchored events.
+
+    Two anchors per traverse, both in VIDEO seconds like ``start_s``:
+      leave  -- the animal's centroid crosses the landmark it departs from
+      arrive -- it crosses the landmark at the far end
+    For `to_arena` that is (left, right); for `to_nest`, (right, left).
+    """
+    events = []
+    for row in csv.DictReader(open(path)):
+        if row["single_animal"].lower() != "true" or row["traversed"].lower() != "true":
+            continue
+        direction = row["landmark_direction"]
+        left, right = float(row["t_left"]), float(row["t_right"])
+        leave, arrive = (left, right) if direction == "to_arena" else (right, left)
+        match = re.search(r"_(\d+)\.mp4$", row["video"])
+        events.append({
+            "file_num": int(match.group(1)), "video": row["video"],
+            "start_s": leave, "end_s": arrive, "direction": direction,
+        })
+    return events
+
+
 def read_transits(path: Path) -> list[dict]:
     """Crossing events, each tagged with the file index that pairs it to audio."""
     events = []
@@ -178,7 +201,11 @@ def rate(counts: np.ndarray, n_anchors: int, bin_s: float) -> np.ndarray:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--transits", required=True, help="events CSV from burrow_transits.py")
+    parser.add_argument("--transits", help="events CSV from burrow_transits.py")
+    parser.add_argument("--landmarks",
+                        help="landmarks.csv from burrow_landmarks.py -- use the precise "
+                             "landmark crossings of clean single-animal traverses instead, "
+                             "aligning on leaving and on arriving")
     parser.add_argument("--exp", type=int, required=True)
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--window", type=float, default=20.0, help="lag range each side, seconds")
@@ -192,31 +219,39 @@ def main() -> None:
     datadir = (Path(args.datadir) if args.datadir
                else BASE_RAW / f"experiment_{args.exp}" / "concatenated_data_cam_mic_sync")
 
-    transits = read_transits(Path(args.transits))
+    if bool(args.transits) == bool(args.landmarks):
+        raise SystemExit("give exactly one of --transits or --landmarks")
+    transits = (read_landmarks(Path(args.landmarks)) if args.landmarks
+                else read_transits(Path(args.transits)))
     calls = read_calls(args.exp)
     drift = measure_drift(datadir, {t["file_num"] for t in transits}, args.camera)
     durations = {num: dur for num, (_, dur) in drift.items()}
+
+    # "start/end" are detector thresholds; "leave/arrive" are landmark crossings
+    names = ("leave", "arrive") if args.landmarks else ("start", "end")
 
     # crossings, converted onto the audio clock so calls and transits share an axis
     anchors_by_direction: dict[tuple[str, str], list[tuple[int, float]]] = defaultdict(list)
     for transit in transits:
         ratio = drift.get(transit["file_num"], (1.0, 360.0))[0]
-        anchors_by_direction[("start", transit["direction"])].append(
+        anchors_by_direction[(names[0], transit["direction"])].append(
             (transit["file_num"], transit["start_s"] * ratio))
-        anchors_by_direction[("end", transit["direction"])].append(
+        anchors_by_direction[(names[1], transit["direction"])].append(
             (transit["file_num"], transit["end_s"] * ratio))
 
     edges = np.arange(-args.window, args.window + args.bin, args.bin)
     centers = edges[:-1] + args.bin / 2
     rng = np.random.default_rng(0)
-    directions = [d for d in ("to_arena", "to_nest") if anchors_by_direction[("start", d)]]
+    directions = [d for d in ("to_arena", "to_nest") if anchors_by_direction[(names[0], d)]]
     locations = ["underground", "arena_1"]
 
     # Aligning to the crossing START asks "does the animal call as it sets off";
     # aligning to the END asks "does it call on arrival". Crossing durations vary
     # a lot (median ~5 s, but up to 30 s), so one alignment smears whatever the
     # other would resolve -- both are plotted.
-    alignments = [("start", "start of the crossing"), ("end", "end of the crossing")]
+    alignments = ([("leave", "moment of leaving (tunnel entry)"),
+                   ("arrive", "moment of arriving (tunnel exit)")] if args.landmarks
+                  else [("start", "start of the crossing"), ("end", "end of the crossing")])
 
     psth_rows, summary_rows = [], []
     for align, align_label in alignments:
@@ -297,7 +332,7 @@ def main() -> None:
     fig, axes = plt.subplots(len(directions), len(present), sharex=True,
                              figsize=(3.1 * len(present), 3.0 * len(directions)), squeeze=False)
     for row, direction in enumerate(directions):
-        anchors = anchors_by_direction[("start", direction)]
+        anchors = anchors_by_direction[(names[0], direction)]
         for col, event_type in enumerate(present):
             ax = axes[row][col]
             times = calls_by_file(calls, "underground", event_type)
@@ -329,7 +364,8 @@ def main() -> None:
             ratio = drift.get(transit["file_num"], (1.0, 360.0))[0]
             a, b = transit["start_s"] * ratio, transit["end_s"] * ratio
             times = underground.get(transit["file_num"], np.empty(0))
-            writer.writerow([transit["video"], transit["start_s"], transit["end_s"],
+            writer.writerow([transit["video"], round(transit["start_s"], 3),
+                             round(transit["end_s"], 3),
                              transit["direction"],
                              int(((times >= a - 5) & (times < a)).sum()),
                              int(((times >= a) & (times <= b)).sum()),

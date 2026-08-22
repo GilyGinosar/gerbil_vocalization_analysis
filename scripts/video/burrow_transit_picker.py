@@ -102,7 +102,15 @@ SPEC_H = 170       # px height of the spectrogram
 RIBBON_H = 14      # px height of the DAS call ribbon under the spectrogram
 DEF_ROI = (600, 470, 1520, 760)   # tunnel box in the 1600x1200 frame; per-camera-framing
 GOP_FRAMES = 250   # keyframe spacing (~8.3 s); a seek costs about this much decoding
-CONTEXT_S = 10.0   # "fixed" layout: seconds of audio shown each side of the crossing midpoint
+CONTEXT_S = 3.0    # "fixed" layout: seconds of lead-in/lead-out around the traverse
+# --- "timeline" layout ------------------------------------------------------
+PX_PER_S = 900     # every card drawn at this scale, so t=0 lands on the same pixel
+TILE_W = 300       # px per frame tile. Frame rate on the card is PX_PER_S / TILE_W --
+                   # the tile IS its own slice of time, so more frames costs width.
+                   # 900/300 = 3 frames per second, enough to see a 1.1 s traverse.
+BEFORE_S = 3.0     # seconds shown before the entry landmark
+AFTER_S = 3.0      # seconds shown after the exit landmark
+AXIS_H = 26        # px for the per-second time ruler drawn under the frame row
 
 # --- spectrogram ------------------------------------------------------------
 FMIN, FMAX = 500, 45000   # Hz. Measured on experiment 492: DAS calls peak at
@@ -110,8 +118,10 @@ FMIN, FMAX = 500, 45000   # Hz. Measured on experiment 492: DAS calls peak at
                           # itself (rustle, scratching) sits below 10 kHz. This
                           # band shows both -- rustle along the bottom, calls above.
 NFFT, HOP = 512, 128      # at 125 kHz: 4.1 ms window, 1.0 ms hop
-DRANGE_DB = 48            # displayed dynamic range below the window's peak; wider than
-                          # this lifts the noise floor into magma's purples and speckles the card
+DRANGE_DB = 20            # dB of range shown below the ceiling, after per-frequency whitening.
+                          # Chosen by sweeping 16/20/24/30 on a call-rich traverse: 30 leaves a
+                          # speckled floor, 16 starts losing the fainter calls.
+CEILING_PCT = 99.7        # percentile of the whitened spectrogram mapped to full brightness
 
 TUNNEL_CHANNEL = 1        # raw mic channel; see the module docstring
 
@@ -150,6 +160,83 @@ def audio_path(datadir: Path, channel: int, index: int) -> Path:
     raise FileNotFoundError(f"no channel {channel} wav for file index {index} in {datadir}")
 
 
+def t_to_x(t: float, t0: float, t1: float, width: int, reverse: bool) -> int:
+    """Time -> pixel column. With ``reverse`` the axis runs right-to-left.
+
+    A `to_nest` animal travels right-to-left across the frame, so laying time
+    out the same way lets the eye follow the animal and the sound together
+    instead of reading them in opposite directions. Only the *layout* mirrors --
+    the video frames keep their own left-right geometry, so the nest stays on
+    the left of every tile.
+    """
+    frac = (t1 - t) / (t1 - t0) if reverse else (t - t0) / (t1 - t0)
+    return int(round(width * frac))
+
+
+def timeline_window(entry_s: float, exit_s: float, before_s: float,
+                    after_s: float) -> tuple[float, float, int]:
+    """Window and pixel width for one card at the shared PX_PER_S scale.
+
+    Every card starts ``before_s`` ahead of the entry landmark and is drawn at
+    the same seconds-per-pixel, so t=0 falls on the identical pixel column on
+    all of them. Cards differ only in how far they run to the right, and the
+    sheet pads the short ones on the right -- so scanning down a page, the
+    moment of entry is one straight vertical line.
+    """
+    t0 = entry_s - before_s
+    t1 = exit_s + after_s
+    return t0, t1, int(round((t1 - t0) * PX_PER_S))
+
+
+def timeline_frames(t0: float, width: int) -> tuple[list[int], list[float]]:
+    """Frame numbers tiling the window, one per TILE_W of time, and their times."""
+    n_tiles = max(1, -(-width // TILE_W))
+    times = [t0 + (i + 0.5) * TILE_W / PX_PER_S for i in range(n_tiles)]
+    return [max(0, int(round(t * FPS))) for t in times], times
+
+
+def time_axis(width: int, t0: float, t1: float, entry_s: float,
+              reverse: bool = False) -> np.ndarray:
+    """A second-by-second ruler, labelled relative to the entry landmark."""
+    axis = np.full((AXIS_H, width, 3), 28, np.uint8)
+    cv2.line(axis, (0, 0), (width, 0), (110, 110, 110), 1)
+    for half in range(int(np.floor((t0 - entry_s) * 2)), int(np.ceil((t1 - entry_s) * 2)) + 1):
+        lag = half / 2
+        x = t_to_x(entry_s + lag, t0, t1, width, reverse)
+        if not 0 <= x < width:
+            continue
+        whole = half % 2 == 0
+        zero = half == 0
+        colour = (120, 255, 120) if zero else ((190, 190, 190) if whole else (110, 110, 110))
+        cv2.line(axis, (x, 0), (x, AXIS_H if zero else (10 if whole else 5)), colour,
+                 2 if zero else 1)
+        if whole:
+            cv2.putText(axis, f"{int(lag):+d}s", (x + 3, AXIS_H - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.42, colour, 1)
+    return axis
+
+
+def rows_from_landmarks(path: Path) -> list[dict]:
+    """Clean single-animal traverses from burrow_landmarks.py, as picker rows.
+
+    ``start_s``/``end_s`` become the landmark crossings -- the animal leaving the
+    near end and arriving at the far end -- instead of the motion detector's
+    threshold times, so the shaded span on each card is the real traverse.
+    """
+    rows = []
+    for row in csv.DictReader(open(path)):
+        if row["single_animal"].lower() != "true" or row["traversed"].lower() != "true":
+            continue
+        direction = row["landmark_direction"]
+        left, right = float(row["t_left"]), float(row["t_right"])
+        leave, arrive = (left, right) if direction == "to_arena" else (right, left)
+        rows.append({"video": row["video"], "direction": direction,
+                     "start_s": f"{leave:.3f}", "end_s": f"{arrive:.3f}",
+                     "x_start": f"{leave:.2f}", "x_end": f"{arrive:.2f}",
+                     "x_max": f"{arrive - leave:.2f}"})
+    return rows
+
+
 def load_calls(exp: int) -> dict[int, list[tuple[float, float, str]]]:
     """DAS calls for one experiment, grouped by file index.
 
@@ -181,44 +268,32 @@ def video_duration(cap: cv2.VideoCapture) -> float:
 
 
 def fixed_window(start_s: float, end_s: float, context_s: float) -> tuple[float, float]:
-    """The same span of seconds on every card, centred on the crossing.
+    """The traverse plus ``context_s`` seconds of lead-in and lead-out.
 
-    Crossings run from 0.7 s to 31 s, so an event-scaled card silently changes
-    its time axis from one crossing to the next and 52 of them cannot be
-    compared by eye. A fixed window fixes the scale and shows the quiet (or
-    not) seconds either side, which is what tells you whether calling belongs
-    to the crossing or was going on anyway.
+    Cards are no longer on a common time scale -- traverses run 0.7 s to 28 s --
+    but the shaded traverse is always a healthy fraction of the card instead of
+    a sliver, which is what matters when you are looking for calls inside it.
+    A scale bar is drawn so the differing scales stay readable.
     """
-    middle = (start_s + end_s) / 2
-    # A crossing longer than the window would run off both edges of its own card,
-    # so you would never see it start or end. Those cards widen to hold the whole
-    # crossing plus half a context each side -- their scale differs, and the label
-    # says so. Crossings up to context_s long (42 of experiment 492's 52) keep the
-    # common scale.
-    half = max(context_s, (end_s - start_s) / 2 + context_s / 2)
-    return middle - half, middle + half
+    return start_s - context_s, end_s + context_s
 
 
 def mark_crossing(tile: np.ndarray, t0: float, t1: float, start_s: float, end_s: float,
-                  context_s: float) -> None:
+                  context_s: float, labels: tuple[str, str] = ("crossing starts", "ends"),
+                  reverse: bool = False) -> None:
     """Shade the crossing inside a fixed window and put a lag scale under it."""
     width = tile.shape[1]
-    xa = max(0, min(width, int(width * (start_s - t0) / (t1 - t0))))
-    xb = max(xa + 1, min(width, int(width * (end_s - t0) / (t1 - t0))))
+    x_start = max(0, min(width, t_to_x(start_s, t0, t1, width, reverse)))
+    x_end = max(0, min(width, t_to_x(end_s, t0, t1, width, reverse)))
+    xa, xb = min(x_start, x_end), max(x_start, x_end)
+    xb = max(xb, xa + 1)
     lifted = tile[:, xa:xb].astype(np.int16) + np.array([30, 10, 0], np.int16)
     tile[:, xa:xb] = np.clip(lifted, 0, 255).astype(np.uint8)
-    cv2.putText(tile, "crossing starts", (xa + 4, SPEC_H - 6),
+    # keep each label beside its own line, whichever side of the card it is on
+    cv2.putText(tile, labels[0], (x_start + (4 if not reverse else -76), SPEC_H - 6),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.38, (150, 255, 150), 1)
-    cv2.putText(tile, "ends", (xb + 4, SPEC_H - 6),
+    cv2.putText(tile, labels[1], (x_end + (4 if not reverse else -50), SPEC_H - 6),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.38, (150, 255, 150), 1)
-    middle = (start_s + end_s) / 2
-    for lag in (-context_s / 2, context_s / 2):
-        x = int(width * (middle + lag - t0) / (t1 - t0))
-        cv2.line(tile, (x, SPEC_H - 10), (x, SPEC_H), (170, 170, 170), 1)
-        cv2.putText(tile, f"{lag:+.0f}s", (x + 3, SPEC_H - 12),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.34, (170, 170, 170), 1)
-
-
 def event_window(start_s: float, end_s: float, pad_s: float) -> tuple[float, float, int]:
     """The card's time window, and how many px of black margin the strip needs.
 
@@ -257,24 +332,38 @@ def read_window(wav: Path, t0: float, t1: float, drift: float, av_offset: float)
     return data, fs * drift
 
 
-def spectrogram_tile(audio: np.ndarray, fs: float, width: int) -> np.ndarray:
-    """A magma BGR image of the audio's spectrogram, exactly ``width`` px wide."""
+def spectrogram_tile(audio: np.ndarray, fs: float, width: int,
+                     reverse: bool = False) -> np.ndarray:
+    """A magma BGR image of the audio's spectrogram, exactly ``width`` px wide.
+
+    Gain is set **per frequency**, not globally. An animal moving through the
+    tube puts a lot of broadband energy below 10 kHz, and normalising against
+    the window's overall peak lets that movement noise set the ceiling -- which
+    leaves the calls, 20-40 dB quieter, sitting near the bottom of the colour
+    range and looking faint. Subtracting each frequency row's own median over
+    the window turns the display into "dB above the local background at this
+    frequency", so a call stands out against its own noise floor regardless of
+    what the low frequencies are doing. Calls are milliseconds long in a
+    multi-second window, so they barely affect their own row's median.
+    """
     if audio.size < NFFT:
         return np.zeros((SPEC_H, width, 3), np.uint8)
     freqs, _, spec = stft(audio, fs=fs, nperseg=NFFT, noverlap=NFFT - HOP, window="hann")
     band = (freqs >= FMIN) & (freqs <= FMAX)
     power_db = 20 * np.log10(np.abs(spec[band]) + 1e-10)
-    ceiling = power_db.max()
-    scaled = (power_db - (ceiling - DRANGE_DB)) / DRANGE_DB
-    image = np.clip(scaled, 0, 1)
+    power_db -= np.median(power_db, axis=1, keepdims=True)      # per-frequency whitening
+    ceiling = float(np.percentile(power_db, CEILING_PCT))
+    image = np.clip((power_db - (ceiling - DRANGE_DB)) / DRANGE_DB, 0, 1)
     image = np.flipud(image)                       # low frequencies at the bottom
+    if reverse:
+        image = np.fliplr(image)                   # time runs right-to-left
     image = (image * 255).astype(np.uint8)
     image = cv2.resize(image, (width, SPEC_H), interpolation=cv2.INTER_LINEAR)
     return cv2.applyColorMap(image, cv2.COLORMAP_MAGMA)
 
 
 def annotate_spectrogram(tile: np.ndarray, t0: float, t1: float,
-                         start_s: float, end_s: float) -> None:
+                         start_s: float, end_s: float, reverse: bool = False) -> None:
     """Draw the kHz scale and mark where the motion event begins and ends."""
     for khz in (10, 20, 30, 40):
         hz = khz * 1000
@@ -285,18 +374,20 @@ def annotate_spectrogram(tile: np.ndarray, t0: float, t1: float,
         cv2.putText(tile, f"{khz}", (22, y + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (200, 200, 200), 1)
     cv2.putText(tile, "kHz", (4, 12), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (200, 200, 200), 1)
     for t in (start_s, end_s):
-        x = int(tile.shape[1] * (t - t0) / (t1 - t0))
-        cv2.line(tile, (x, 0), (x, SPEC_H), (120, 255, 120), 1)
+        x = t_to_x(t, t0, t1, tile.shape[1], reverse)
+        cv2.line(tile, (x, 0), (x, SPEC_H), (120, 255, 120), 2)
 
 
 def call_ribbon(calls: list[tuple[float, float, str]], t0: float, t1: float,
-                width: int, drift: float, av_offset: float) -> tuple[np.ndarray, dict[str, int]]:
+                width: int, drift: float, av_offset: float,
+                reverse: bool = False) -> tuple[np.ndarray, dict[str, int]]:
     """A thin bar per DAS call in the window, coloured by type; also counts them.
 
     Call times are audio-file seconds, so they come back to video time as
     ``(t - av_offset) / drift`` before being placed on the shared axis.
     """
     ribbon = np.full((RIBBON_H, width, 3), 26, np.uint8)
+    _ = reverse
     counts: dict[str, int] = defaultdict(int)
     for start_audio, stop_audio, event_type in calls:
         start = (start_audio - av_offset) / drift
@@ -304,8 +395,9 @@ def call_ribbon(calls: list[tuple[float, float, str]], t0: float, t1: float,
         if stop < t0 or start > t1:
             continue
         counts[event_type] += 1
-        xa = int(width * (start - t0) / (t1 - t0))
-        xb = max(xa + 2, int(width * (stop - t0) / (t1 - t0)))
+        xa, xb = sorted((t_to_x(start, t0, t1, width, reverse),
+                         t_to_x(stop, t0, t1, width, reverse)))
+        xb = max(xb, xa + 2)
         cv2.rectangle(ribbon, (xa, 2), (xb, RIBBON_H - 3),
                       CALL_COLORS.get(event_type, (200, 200, 200)), -1)
     return ribbon, dict(counts)
@@ -344,6 +436,34 @@ def read_frames(cap: cv2.VideoCapture, wanted: list[int]) -> dict[int, np.ndarra
     return frames
 
 
+def timeline_strip(frames: dict[int, np.ndarray], numbers: list[int],
+                   roi: tuple[int, int, int, int], width: int, gray: bool,
+                   reverse: bool = False) -> np.ndarray:
+    """Frame tiles laid along the time axis: tile i covers seconds [i, i+1) of the card.
+
+    With ``reverse`` the tiles are laid right-to-left so they share the mirrored
+    time axis; each tile's own image is untouched, so the tunnel geometry (nest
+    left, arena right) reads the same in every one.
+    """
+    x1, y1, x2, y2 = roi
+    tile_h = int(round(TILE_W * (y2 - y1) / (x2 - x1)))
+    tiles = []
+    for frame_no in numbers:
+        frame = frames.get(frame_no)
+        if frame is None:
+            tiles.append(np.zeros((tile_h, TILE_W, 3), np.uint8))
+            continue
+        tile = cv2.resize(frame[y1:y2, x1:x2], (TILE_W, tile_h))
+        if gray:
+            tile = cv2.cvtColor(cv2.cvtColor(tile, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR)
+        cv2.rectangle(tile, (0, 0), (TILE_W - 1, tile_h - 1), (45, 45, 45), 1)
+        tiles.append(tile)
+    if reverse:
+        tiles = tiles[::-1]
+        return cv2.hconcat(tiles)[:, -width:]
+    return cv2.hconcat(tiles)[:, :width]
+
+
 def frame_strip(frames: dict[int, np.ndarray], numbers: list[int],
                 roi: tuple[int, int, int, int], margin_px: int,
                 gray: bool = True) -> np.ndarray:
@@ -378,10 +498,17 @@ def frame_strip(frames: dict[int, np.ndarray], numbers: list[int],
 def build_cards(events_csv: Path, datadir: Path, roi, pad_s: float, drift_on: bool,
                 av_offset: float, channel: int, calls_by_file, skip_unclear: bool,
                 gray_video: bool = True, layout: str = "fixed",
-                context_s: float = CONTEXT_S):
+                context_s: float = CONTEXT_S, landmarks: bool = False,
+                before_s: float = BEFORE_S, after_s: float = AFTER_S,
+                only_direction: str | None = None, reverse_time: bool = False):
     """One card (direction, id, image data-URI, label) per event, video by video."""
-    rows = [r for r in csv.DictReader(open(events_csv))
-            if not (skip_unclear and r["direction"] == "unclear")]
+    if landmarks:
+        rows = rows_from_landmarks(events_csv)
+    else:
+        rows = [r for r in csv.DictReader(open(events_csv))
+                if not (skip_unclear and r["direction"] == "unclear")]
+    if only_direction:
+        rows = [r for r in rows if r["direction"] == only_direction]
     by_video = defaultdict(list)
     for row in rows:
         by_video[row["video"]].append(row)
@@ -401,14 +528,26 @@ def build_cards(events_csv: Path, datadir: Path, roi, pad_s: float, drift_on: bo
         drift = audio_dur / video_duration(cap) if drift_on else 1.0
 
         # decode every frame this video needs in one forward pass, then cut cards
-        numbers = {row["start_s"]: strip_frame_numbers(float(row["start_s"]), float(row["end_s"]))
-                   for row in by_video[video_name]}
+        if layout == "timeline":
+            numbers = {}
+            for row in by_video[video_name]:
+                t0, _t1, width = timeline_window(float(row["start_s"]), float(row["end_s"]),
+                                                 before_s, after_s)
+                numbers[row["start_s"]] = timeline_frames(t0, width)[0]
+        else:
+            numbers = {row["start_s"]: strip_frame_numbers(float(row["start_s"]),
+                                                           float(row["end_s"]))
+                       for row in by_video[video_name]}
         frames = read_frames(cap, [n for ns in numbers.values() for n in ns])
         cap.release()
 
         for row in by_video[video_name]:
             start_s, end_s = float(row["start_s"]), float(row["end_s"])
-            if layout == "fixed":
+            if layout == "timeline":
+                t0, t1, width = timeline_window(start_s, end_s, before_s, after_s)
+                tile_frames, _times = timeline_frames(t0, width)
+                strip = timeline_strip(frames, tile_frames, roi, width, gray_video, reverse_time)
+            elif layout == "fixed":
                 # frames at full size; the spectrogram above spans the same
                 # number of seconds on every card, with the crossing shaded
                 t0, t1 = fixed_window(start_s, end_s, context_s)
@@ -419,25 +558,35 @@ def build_cards(events_csv: Path, datadir: Path, roi, pad_s: float, drift_on: bo
             width = strip.shape[1]
 
             audio, fs = read_window(wav, t0, t1, drift, av_offset)
-            spec = spectrogram_tile(audio, fs, width)
-            annotate_spectrogram(spec, t0, t1, start_s, end_s)
+            spec = spectrogram_tile(audio, fs, width, reverse_time)
+            annotate_spectrogram(spec, t0, t1, start_s, end_s, reverse_time)
             if layout == "fixed":
-                mark_crossing(spec, t0, t1, start_s, end_s, context_s)
+                mark_crossing(spec, t0, t1, start_s, end_s, context_s,
+                              ("leaves", "arrives") if landmarks else ("crossing starts", "ends"))
+            if layout == "timeline":
+                mark_crossing(spec, t0, t1, start_s, end_s, before_s, ("enters", "arrives"),
+                              reverse_time)
             ribbon, counts = call_ribbon(calls_by_file.get(index, []), t0, t1,
-                                         width, drift, av_offset)
+                                         width, drift, av_offset, reverse_time)
+            parts = [spec, ribbon, strip] if calls_by_file else [spec, strip]
+            if layout == "timeline":
+                axis = time_axis(width, t0, t1, start_s, reverse_time)
+                parts = ([spec, ribbon, strip, axis] if calls_by_file
+                         else [spec, strip, axis])
 
-            ok, buf = cv2.imencode(".jpg", cv2.vconcat([spec, ribbon, strip]),
+            ok, buf = cv2.imencode(".jpg", cv2.vconcat(parts),
                                    [cv2.IMWRITE_JPEG_QUALITY, 75])
             if not ok:
                 continue
-            call_text = ("  calls: " + ", ".join(f"{n} {t}" for t, n in sorted(counts.items()))
-                         if counts else "  no calls")
-            scale_note = ""
-            if layout == "fixed" and (t1 - t0) > 2 * context_s + 0.01:
-                scale_note = f"  [wider card: {t1 - t0:.0f}s, this crossing is long]"
-            label = (f"{video_name}  t={row['start_s']}s  {row['direction']}  "
-                     f"{end_s - start_s:.1f}s  x{row['x_start']}->{row['x_end']}"
-                     f"{call_text}{scale_note}")
+            # Only claim anything about calls when the ribbon is actually drawn --
+            # with it off, an empty count means "not looked at", not "no calls".
+            call_text = ""
+            if calls_by_file:
+                call_text = ("  calls: " + ", ".join(f"{n} {t}" for t, n in sorted(counts.items()))
+                             if counts else "  no calls")
+            span = f"{end_s - start_s:.1f}s" if landmarks else f"{end_s - start_s:.1f}s"
+            label = (f"{video_name}  t={start_s:.2f}s  {row['direction']}  "
+                     f"traverse {span}  window {t1 - t0:.1f}s{call_text}")
             cards.append((row["direction"], f"{video_name}|{row['start_s']}",
                           "data:image/jpeg;base64," + base64.b64encode(buf).decode(), label))
         print(f"{video_name}: {len(by_video[video_name])} cards", flush=True)
@@ -507,9 +656,14 @@ def write_html(cards, out_dir: Path) -> Path:
 
 
 def main() -> None:
+    global PX_PER_S, TILE_W          # the timeline scale is set from the CLI
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--from-csv", required=True, help="events CSV from burrow_transits.py")
+    parser.add_argument("--from-csv", required=True,
+                        help="events CSV from burrow_transits.py, or landmarks.csv with --landmarks")
+    parser.add_argument("--landmarks", action="store_true",
+                        help="--from-csv is a landmarks.csv from burrow_landmarks.py: keep only "
+                             "clean single-animal traverses and shade the real landmark span")
     parser.add_argument("--exp", type=int, required=True, help="experiment id (finds the raw folder and calls.csv)")
     parser.add_argument("--out-dir", required=True, help="directory to write index.html into")
     parser.add_argument("--datadir", help="override the concatenated_data_cam_mic_sync folder")
@@ -517,16 +671,35 @@ def main() -> None:
                         help="x1,y1,x2,y2 tunnel box; re-check per date with burrow_transits.py --preview")
     parser.add_argument("--channel", type=int, default=TUNNEL_CHANNEL,
                         help=f"raw mic channel, 0-based (default {TUNNEL_CHANNEL} = tunnel)")
-    parser.add_argument("--layout", choices=("fixed", "eventspan"), default="fixed",
-                        help="fixed: the same time span on every card, crossing shaded -- "
+    parser.add_argument("--direction", help="keep only this direction, e.g. to_nest")
+    parser.add_argument("--reverse-time", action="store_true",
+                        help="lay time out right-to-left, matching a to_nest animal's direction "
+                             "of travel; video frames keep their own geometry")
+    parser.add_argument("--px-per-s", type=float, default=900.0,
+                        help="timeline layout: horizontal scale (default 900). Frames per "
+                             "second on the card = px-per-s / tile-w, because each tile is "
+                             "its own slice of time -- more frames costs card width.")
+    parser.add_argument("--tile-w", type=int, default=300,
+                        help="timeline layout: px per frame tile (default 300)")
+    parser.add_argument("--before", type=float, default=BEFORE_S,
+                        help=f"timeline layout: seconds before the entry landmark (default {BEFORE_S:.0f})")
+    parser.add_argument("--after", type=float, default=AFTER_S,
+                        help=f"timeline layout: seconds after the exit landmark (default {AFTER_S:.0f})")
+    parser.add_argument("--layout", choices=("timeline", "fixed", "eventspan"), default="fixed",
+                        help="timeline: every card at one seconds-per-pixel scale with t=0 at "
+                             "the entry landmark, frames laid along that same axis -- rows line "
+                             "up across a sheet. "
+                             "fixed: the same time span on every card, crossing shaded -- "
                              "comparable across cards (default). eventspan: the spectrogram "
                              "is scaled to the crossing and shares an exact axis with the frames.")
     parser.add_argument("--context", type=float, default=CONTEXT_S,
-                        help=f"fixed layout: seconds shown each side of the crossing "
-                             f"(default {CONTEXT_S:.0f})")
+                        help=f"fixed layout: seconds of lead-in and lead-out around the "
+                             f"traverse (default {CONTEXT_S:.0f})")
     parser.add_argument("--pad", type=float, default=0.5,
                         help="eventspan layout: extra seconds of audio each side (default 0.5)")
-    parser.add_argument("--no-calls", action="store_true", help="skip the DAS call ribbon")
+    parser.add_argument("--calls", action="store_true",
+                        help="draw the DAS call ribbon under the spectrogram (off by default: "
+                             "read the calls off the spectrogram itself)")
     parser.add_argument("--color-video", action="store_true",
                         help="keep the cameras' raw IR colour cast instead of desaturating")
     parser.add_argument("--no-drift", action="store_true", help="skip the audio/video clock-drift correction")
@@ -537,6 +710,7 @@ def main() -> None:
 
     datadir = (Path(args.datadir) if args.datadir
                else BASE_RAW / f"experiment_{args.exp}" / "concatenated_data_cam_mic_sync")
+    PX_PER_S, TILE_W = args.px_per_s, args.tile_w
     roi = tuple(int(v) for v in args.roi.split(","))
 
     mapping = get_channel_mapping(args.exp)
@@ -545,12 +719,14 @@ def main() -> None:
         print(f"note: channel {args.channel} is not in this experiment's underground pair "
               f"{underground} -- the tunnel mic is one of those")
 
-    calls_by_file = {} if args.no_calls else load_calls(args.exp)
+    calls_by_file = load_calls(args.exp) if args.calls else {}
     cards = build_cards(Path(args.from_csv), datadir, roi, args.pad, not args.no_drift,
                         args.av_offset, args.channel, calls_by_file,
                         skip_unclear=not args.include_unclear,
                         gray_video=not args.color_video, layout=args.layout,
-                        context_s=args.context)
+                        context_s=args.context, landmarks=args.landmarks,
+                        before_s=args.before, after_s=args.after,
+                        only_direction=args.direction, reverse_time=args.reverse_time)
     path = write_html(cards, Path(args.out_dir))
     print(f"picker ready (self-contained): {path}  ({len(cards)} events, ch{args.channel:02d}, "
           f"{args.layout} layout)")

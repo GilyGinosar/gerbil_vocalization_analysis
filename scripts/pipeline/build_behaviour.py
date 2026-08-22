@@ -30,7 +30,7 @@ from scripts.pipeline.audio_processing_config import list_date_folders
 from scripts.pipeline.paths import PROCESSED_ROOT
 from scripts.pipeline.pool_calls import add_exp_times
 from scripts.utils.tracking_io import (FPS, experiments_in, load_detections,
-                                       load_files_vetted, synced_durations, video_durations)
+                                       load_files_vetted, video_durations)
 
 BEHAVIOUR_ROOT = PROCESSED_ROOT / "behaviour"
 
@@ -62,9 +62,9 @@ def filmed_seconds(date_folder: str) -> pd.DataFrame:
     invent silence.
     """
     rows = []
-    for video in synced_durations(date_folder).itertuples():
+    for video in video_durations(date_folder).itertuples():
         start = video.chunk_start_real.floor("s")
-        for offset in range(int(round(video.synced_s))):
+        for offset in range(int(round(video.duration_s))):
             rows.append({"exp": video.exp, "location": video.location,
                          "second": start + pd.Timedelta(seconds=offset)})
     return pd.DataFrame(rows).drop_duplicates()

@@ -51,10 +51,16 @@ import argparse
 import re
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from scripts.pipeline.audio_processing_config import list_date_folders
+from scipy.io import wavfile
+
 from scripts.pipeline.paths import (
+    AUDIO_ROOT,
     pooled_detections_path,
     pooled_files_vetted_path,
     video_date_dir,
@@ -89,6 +95,43 @@ CAMERA_TO_LOCATION = {
 # occupancy there can only ever be inferred by subtraction from colony size.
 
 CSV_PATTERN = re.compile(r"^video_(?P<camera>.+)_(?P<file_num>\d+)\.csv$")
+
+# A chunk should be one moment recorded by every stream at once. In the final
+# chunk of an experiment that breaks: the cameras keep rolling for hours while
+# the audio stops after a couple of minutes. Those chunks are dropped whole --
+# 25.5 h of 2026_02, 6.1% -- rather than carrying video that no call could ever
+# accompany. `files_vetted` keeps the row and the measurements, so it is auditable.
+AUDIO_VIDEO_TOLERANCE_S = 60
+
+
+WAV_HEADER_BYTES = 44
+
+
+def audio_format(date_folder: str, exp: int) -> tuple[int, int] | None:
+    """(sample rate, bytes per sample) for one experiment, read from one wav.
+
+    Opening every wav to get its length costs ~100 ms each and there are
+    thousands. The header is identical within an experiment, so read it once and
+    get every other length from the file size -- verified exact to 0.0 ms.
+    """
+    folder = AUDIO_ROOT / date_folder / str(exp) / "Averaged_wavs_w_annotations"
+    for wav in sorted(folder.glob("channel_10_file_*.wav"))[:1]:
+        fs, data = wavfile.read(wav, mmap=True)
+        return fs, data.dtype.itemsize
+    return None
+
+
+def audio_seconds(date_folder: str, exp: int, file_num: int,
+                  fmt: tuple[int, int] | None) -> float:
+    """Length of the averaged wav for a chunk, from its size. NaN if absent."""
+    if fmt is None:
+        return float("nan")
+    wav = (AUDIO_ROOT / date_folder / str(exp) / "Averaged_wavs_w_annotations"
+           / f"channel_10_file_{file_num:03d}.wav")
+    if not wav.exists():
+        return float("nan")
+    fs, bytes_per_sample = fmt
+    return (wav.stat().st_size - WAV_HEADER_BYTES) / (bytes_per_sample * fs)
 
 DETECTION_COLS = ["exp", "location", "file_num", "frame_id", "det_id", "conf",
                   "center_x", "center_y", "bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2",
@@ -142,6 +185,7 @@ def load_experiment_detections(date_folder: str, exp: int,
         raise FileNotFoundError(f"No tracking output for experiment {exp}: {folder}")
 
     file_to_real, _ = chunk_start_times(exp)
+    wav_format = audio_format(date_folder, exp)
 
     det_frames, vetted, unmapped = [], [], set()
     upstream_flag = False
@@ -167,6 +211,8 @@ def load_experiment_detections(date_folder: str, exp: int,
             "chunk_start_real": chunk_start,
             "n_detections": len(df),
             "n_stationary": int(df["stationary"].sum()) if "stationary" in df.columns else 0,
+            "video_s": (int(df["frame_id"].max()) + 1) / FPS if len(df) else float("nan"),
+            "audio_s": audio_seconds(date_folder, exp, file_num, wav_format),
             "max_frame_id": int(df["frame_id"].max()) if len(df) else pd.NA,
             "has_video": csv_path.with_suffix(".mp4").exists(),
             "in_sync_csv": chunk_start is not None,
@@ -202,6 +248,9 @@ def load_experiment_detections(date_folder: str, exp: int,
     vetted_df = pd.DataFrame(vetted)
     if not vetted_df.empty:
         vetted_df["stationary_source"] = source
+        # a chunk is usable only if its streams agree on how long it was
+        overrun = vetted_df["video_s"] - vetted_df["audio_s"]
+        vetted_df["synced"] = ~(overrun > AUDIO_VIDEO_TOLERANCE_S)
         # nullable Int64, so "no detections" reads as <NA> instead of demoting the
         # whole column to float and showing frame numbers as 10799.0
         vetted_df["max_frame_id"] = vetted_df["max_frame_id"].astype("Int64")
@@ -222,29 +271,22 @@ def write_experiment(date_folder: str, exp: int, skip_existing: bool = False,
     return det_path, vetted_path
 
 
-def pool_date_folder(date_folder: str, skip_existing: bool = False
-                     ) -> tuple[pd.DataFrame, pd.DataFrame, list[tuple[int, str]]]:
-    """Write every experiment's files, then concatenate them for the date folder."""
-    root = video_date_dir(date_folder)
-    if not root.exists():
-        raise FileNotFoundError(f"No tracking output for {date_folder}: {root}")
-    exps = sorted(int(p.name) for p in root.iterdir() if p.is_dir() and p.name.isdigit())
+def drop_unsynced(dets: pd.DataFrame, vetted: pd.DataFrame) -> pd.DataFrame:
+    """Remove detections from chunks whose video and audio disagree in length.
 
-    det_frames, vetted_frames, failed = [], [], []
-    for exp in exps:
-        try:
-            det_path, vetted_path = write_experiment(date_folder, exp, skip_existing)
-        except (FileNotFoundError, ValueError) as exc:
-            failed.append((exp, str(exc)))
-            continue
-        dets, vetted = pd.read_parquet(det_path), read_files_vetted(vetted_path)
-        if not dets.empty:
-            det_frames.append(dets)
-        if not vetted.empty:
-            vetted_frames.append(vetted)
-    dets = pd.concat(det_frames, ignore_index=True) if det_frames else pd.DataFrame()
-    vetted = pd.concat(vetted_frames, ignore_index=True) if vetted_frames else pd.DataFrame()
-    return dets, vetted, failed
+    Applied per experiment, while the frame is still small.
+    """
+    if dets.empty or "synced" not in vetted.columns:
+        return dets
+    bad = vetted.loc[~vetted["synced"], ["exp", "location", "file_num"]]
+    if bad.empty:
+        return dets
+
+    drop = np.zeros(len(dets), dtype=bool)
+    for chunk in bad.itertuples():
+        drop |= ((dets["exp"] == chunk.exp) & (dets["file_num"] == chunk.file_num)
+                 & (dets["location"] == chunk.location)).to_numpy()
+    return dets[~drop]
 
 
 def drop_stationary(dets: pd.DataFrame) -> pd.DataFrame:
@@ -253,6 +295,72 @@ def drop_stationary(dets: pd.DataFrame) -> pd.DataFrame:
         return dets
     clean = dets[~dets["stationary"]]
     return clean.drop(columns=["stationary"])
+
+
+def pool_date_folder(date_folder: str, skip_existing: bool = False,
+                     keep_stationary: bool = False
+                     ) -> tuple[dict, pd.DataFrame, list[tuple[int, str]]]:
+    """Write each experiment's files, streaming them into the pooled parquet.
+
+    Streamed rather than concatenated: the pooled table is tens of millions of
+    rows, and holding the per-experiment frames plus the concatenation needs two
+    copies of all of it, which does not fit in the memory a JupyterHub job gets.
+    Only one experiment is ever in hand.
+    """
+    root = video_date_dir(date_folder)
+    if not root.exists():
+        raise FileNotFoundError(f"No tracking output for {date_folder}: {root}")
+    exps = sorted(int(p.name) for p in root.iterdir() if p.is_dir() and p.name.isdigit())
+
+    det_path = pooled_detections_path(date_folder)
+    writer = None
+    vetted_frames, failed = [], []
+    stats = {"rows": 0, "stationary_dropped": 0, "unsynced_chunks": 0,
+             "per_location": {}, "first": None, "last": None, "experiments": set()}
+
+    for exp in exps:
+        try:
+            exp_det_path, exp_vetted_path = write_experiment(date_folder, exp, skip_existing)
+        except (FileNotFoundError, ValueError) as exc:
+            failed.append((exp, str(exc)))
+            continue
+
+        dets = pd.read_parquet(exp_det_path)
+        vetted = read_files_vetted(exp_vetted_path)
+        vetted_frames.append(vetted)
+
+        if "synced" in vetted.columns:
+            stats["unsynced_chunks"] += int((~vetted["synced"]).sum())
+        dets = drop_unsynced(dets, vetted)
+
+        if not keep_stationary:
+            before = len(dets)
+            dets = drop_stationary(dets)
+            stats["stationary_dropped"] += before - len(dets)
+
+        if dets.empty:
+            continue
+
+        stats["rows"] += len(dets)
+        stats["experiments"].add(exp)
+        for location, count in dets["location"].value_counts().items():
+            stats["per_location"][location] = stats["per_location"].get(location, 0) + int(count)
+        first, last = dets["start_time_real"].min(), dets["start_time_real"].max()
+        stats["first"] = first if stats["first"] is None else min(stats["first"], first)
+        stats["last"] = last if stats["last"] is None else max(stats["last"], last)
+
+        dets["location"] = dets["location"].astype(str)      # stable schema across experiments
+        table = pa.Table.from_pandas(dets, preserve_index=False)
+        if writer is None:
+            det_path.parent.mkdir(parents=True, exist_ok=True)
+            writer = pq.ParquetWriter(det_path, table.schema)
+        writer.write_table(table)
+
+    if writer is not None:
+        writer.close()
+
+    vetted_all = pd.concat(vetted_frames, ignore_index=True) if vetted_frames else pd.DataFrame()
+    return stats, vetted_all, failed
 
 
 def run(date_folders: list[str], dry_run: bool, skip_existing: bool,
@@ -266,7 +374,7 @@ def run(date_folders: list[str], dry_run: bool, skip_existing: bool,
                 print(f"  DRY RUN — would write per-experiment files for {len(exps)} experiments,")
                 print(f"  DRY RUN — then {pooled_detections_path(date_folder)}")
                 continue
-            dets, vetted, failed = pool_date_folder(date_folder, skip_existing)
+            stats, vetted, failed = pool_date_folder(date_folder, skip_existing, keep_stationary)
         except FileNotFoundError as exc:
             print(f"  {exc}")
             continue
@@ -275,35 +383,27 @@ def run(date_folders: list[str], dry_run: bool, skip_existing: bool,
             continue
 
         empty = int((vetted["n_detections"] == 0).sum())
-        print(f"  {len(dets):,} detections from {vetted['exp'].nunique()} experiments, {len(vetted)} videos")
+        print(f"  {stats['rows']:,} detections from {len(stats['experiments'])} experiments, "
+              f"{len(vetted)} videos")
         print(f"  videos with zero detections: {empty}/{len(vetted)} ({100*empty/len(vetted):.0f}%)")
-        if "stationary" in dets.columns and len(dets):
-            st = dets.groupby("location")["stationary"].mean()
-            print("  flagged `stationary` (detector stuck on an object): "
-                  + ", ".join(f"{k} {100*v:.1f}%" for k, v in st.items()))
-            by_source = vetted.groupby("stationary_source")["exp"].nunique().to_dict()
-            print(f"  stationary flag source, experiments: {by_source}")
+        if stats["unsynced_chunks"]:
+            print(f"  skipped {stats['unsynced_chunks']} out-of-sync chunk(s): video outran audio "
+                  f"by >{AUDIO_VIDEO_TOLERANCE_S}s, so no call could accompany that video")
+        if stats["stationary_dropped"]:
+            print(f"  dropped {stats['stationary_dropped']:,} stationary detections "
+                  f"(detector stuck on a fixed object)")
         print("  per-location:")
-        for loc, grp in vetted.groupby("location"):
-            print(f"    {loc:<12} {len(grp):4d} videos, {grp['exp'].nunique():2d} experiments, "
-                  f"{int(grp['n_detections'].sum()):,} detections")
-        if not dets.empty:
-            print(f"  spans {dets['start_time_real'].min()} .. {dets['start_time_real'].max()}")
+        for location, count in sorted(stats["per_location"].items()):
+            print(f"    {location:<12} {count:,} detections")
+        print(f"  spans {stats['first']} .. {stats['last']}")
         if failed:
             print(f"  {len(failed)} experiment(s) skipped:")
             for exp, reason in failed[:5]:
                 print(f"    {exp}: {reason[:110]}")
 
-        if not keep_stationary:
-            before = len(dets)
-            dets = drop_stationary(dets)
-            print(f"  dropped {before - len(dets):,} stationary detections "
-                  f"({100*(before-len(dets))/max(before,1):.1f}%) -> {len(dets):,} in the pooled file")
-
-        det_path, vetted_path = pooled_detections_path(date_folder), pooled_files_vetted_path(date_folder)
-        dets.to_parquet(det_path, index=False)
+        vetted_path = pooled_files_vetted_path(date_folder)
         vetted.to_csv(vetted_path, index=False)
-        print(f"  wrote {det_path}")
+        print(f"  wrote {pooled_detections_path(date_folder)}")
         print(f"  wrote {vetted_path}")
     return 0
 
