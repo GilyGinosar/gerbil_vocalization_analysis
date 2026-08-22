@@ -90,7 +90,7 @@ def caption(width: int, text: str, calls: int) -> np.ndarray:
 
 def build_sheets(cards: list[dict], out_dir: Path, per_sheet: int, quality: int,
                  align: str = "left", sort_by: str = "calls",
-                 max_width: int = 6000) -> list[Path]:
+                 max_width: int = 6000, split_calls: bool = False) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     # a call key only belongs on the sheet when the cards actually carry a ribbon
     with_calls = any("calls" in card["label"] for card in cards)
@@ -98,9 +98,15 @@ def build_sheets(cards: list[dict], out_dir: Path, per_sheet: int, quality: int,
 
     by_direction: dict[str, list[dict]] = {}
     for card in cards:
-        by_direction.setdefault(card["direction"], []).append(card)
+        # vocal and quiet traverses on separate sheets: the question is whether calling
+        # accompanies the passage, and mixing them makes that hard to see at a glance
+        key = card["direction"] + ("_calls" if card["calls"] else "_quiet") if split_calls \
+            else card["direction"]
+        by_direction.setdefault(key, []).append(card)
 
-    for direction in [d for d in DIRECTIONS + ["other"] if d in by_direction]:
+    order = ([f"{d}{s}" for d in DIRECTIONS + ["other"] for s in ("_calls", "_quiet")]
+             if split_calls else DIRECTIONS + ["other"])
+    for direction in [d for d in order if d in by_direction]:
         # Sheet width is set by its widest card, so grouping similar widths keeps
         # short traverses off a page stretched by one long one.
         if sort_by == "width":
@@ -112,7 +118,7 @@ def build_sheets(cards: list[dict], out_dir: Path, per_sheet: int, quality: int,
         # widest member, so without this one 28 s traverse makes an 18000 px page
         # on which every other card is mostly padding.
         pages, page = [], []
-        side = ("right" if direction == "to_nest" else "left") if align == "auto" else align
+        side = ("right" if direction.startswith("to_nest") else "left") if align == "auto" else align
         for card in group:
             wide = max([card["image"].shape[1]] + [c["image"].shape[1] for c in page])
             if page and (len(page) >= per_sheet or wide > max_width):
@@ -160,6 +166,8 @@ def main() -> None:
                         help="start a new sheet rather than let it get wider than this "
                              "(default 6000 px); a single card wider than the budget still "
                              "gets its own sheet")
+    parser.add_argument("--split-calls", action="store_true",
+                        help="separate sheets for traverses with and without DAS calls in view")
     parser.add_argument("--sort", choices=("calls", "width"), default="calls",
                         help="order cards within a direction. 'width' groups similar-length "
                              "traverses together so one long card cannot stretch a whole sheet.")
@@ -175,7 +183,7 @@ def main() -> None:
     if not cards:
         raise SystemExit(f"no cards found in {args.picker}")
     written = build_sheets(cards, Path(args.out_dir), args.per_sheet, args.quality, args.align, args.sort,
-                           args.max_width)
+                           args.max_width, args.split_calls)
     print(f"\n{len(cards)} crossings -> {len(written)} sheets in {args.out_dir}")
 
 

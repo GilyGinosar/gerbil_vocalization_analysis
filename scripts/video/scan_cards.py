@@ -28,6 +28,7 @@ import soundfile as sf
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.pipeline.paths import BASE_RAW  # noqa: E402
+from scripts.video.burrow_transit_picker import load_calls  # noqa: E402
 from scripts.video.burrow_scan import AFTER_S, BEFORE_S, TILE_FPS, TILE_W  # noqa: E402
 from scripts.video.burrow_transit_picker import (  # noqa: E402
     t_to_x,
@@ -91,6 +92,9 @@ def main() -> None:
     parser.add_argument("--datadir")
     parser.add_argument("--channel", type=int, default=1)
     parser.add_argument("--include-multi", action="store_true")
+    parser.add_argument("--alone", action="store_true",
+                        help="keep only traverses where no second animal is in the tunnel at "
+                             "any point in the card -- so a call cannot be aimed at a tube-mate")
     parser.add_argument("--left", type=float, default=0.15)
     parser.add_argument("--right", type=float, default=0.75)
     args = parser.parse_args()
@@ -101,8 +105,11 @@ def main() -> None:
     rows = [r for r in csv.DictReader(open(scan / "traverses.csv"))
             if r.get("tile") and (args.include_multi or r["single_animal"].lower() == "true")]
 
+    calls_by_file = load_calls(args.exp)
     drift_cache: dict[int, float] = {}
+    tracks: dict[str, pd.DataFrame] = {}
     cards = []
+    dropped_not_alone = 0
     for row in rows:
         strip = cv2.imread(str(scan / row["tile"]))
         if strip is None:
@@ -118,6 +125,9 @@ def main() -> None:
         drift = drift_cache[index]
 
         entry, exit_ = float(row["t_entry"]), float(row["t_exit"])
+        stem = Path(row["video"]).stem
+        if stem not in tracks:
+            tracks[stem] = pd.read_parquet(scan / "tracks" / f"{stem}.parquet")
         width = strip.shape[1]
         t0 = entry - BEFORE_S
         t1 = t0 + width / PX_PER_S          # the strip's own extent defines the window
@@ -132,19 +142,29 @@ def main() -> None:
             tiles = [strip[:, i * TILE_W:(i + 1) * TILE_W] for i in range(n_tiles)]
             strip = cv2.hconcat(tiles[::-1])
 
-        # Each cached tile shows the frame at the START of its 0.5 s slot, so the
-        # frame beside a landmark could be up to half a second stale. Shifting the
-        # strip left by half a tile puts each frame's instant at its tile's centre,
-        # making the error symmetric (+/-0.25 s) instead of one-sided.
-        shift = TILE_W // 2
-        strip = cv2.hconcat([strip[:, shift:], np.zeros((strip.shape[0], shift, 3), np.uint8)])
+        # No half-tile shift. Each tile shows the frame at the START of its 0.5 s
+        # slot, and the lead-in is an exact multiple of that slot, so the entry
+        # landmark lands precisely on a tile boundary -- the shading begins at the
+        # left edge of the very frame in which the animal crosses. Centring the
+        # frames would buy +/-0.25 s of nominal accuracy and lose that
+        # correspondence, which is the thing you actually read off the card.
+        if args.alone:
+            # Strictly alone for the WHOLE card, not just under the 0.25 threshold and
+            # not just during the traverse. If another animal is in the tube at all,
+            # a call could be addressed to it rather than tied to the passage -- which
+            # is the confound this filter exists to remove.
+            window = tracks[stem]
+            window = window[(window.frame >= t0 * 30) & (window.frame <= t1 * 30)]
+            if len(window) and int(window.n_animals.max()) > 1:
+                dropped_not_alone += 1
+                continue
 
         audio, fs = read_window(audio_path(datadir, args.channel, index), t0, t1, drift, 0.0)
         spec = spectrogram_tile(audio, fs, width, reverse)
         # light tone = animal in the tunnel; strong tone + green lines = the traverse
         out = float(row["t_out"])
-        shade(spec, t0, t1, entry, out, reverse, (26, 10, 0))
-        annotate_spectrogram(spec, t0, t1, entry, exit_, reverse)
+        # the two green lines are entry and the animal leaving the tunnel
+        annotate_spectrogram(spec, t0, t1, entry, out, reverse)
         mark_crossing(spec, t0, t1, entry, out, BEFORE_S, ("enters", "out of tunnel"), reverse)
         axis = time_axis(width, t0, t1, entry, reverse)
         # a guide line where movement noise ends and calls begin
@@ -159,16 +179,25 @@ def main() -> None:
                                [cv2.IMWRITE_JPEG_QUALITY, 82])
         if not ok:
             continue
+        # DAS calls in view, so the sheets can be split into vocal and quiet
+        counts: dict[str, int] = {}
+        for call_start, _stop, event_type in calls_by_file.get(index, []):
+            if t0 <= (call_start - 0.0) / drift <= t1:
+                counts[event_type] = counts.get(event_type, 0) + 1
+        call_text = ("  calls: " + ", ".join(f"{n} {t}" for t, n in sorted(counts.items()))
+                     if counts else "  no calls")
         flag = "" if row["single_animal"].lower() == "true" else "  [>1 animal]"
         if row.get("still_in_tunnel_at_cap", "").lower() == "true":
             flag += "  [still in tunnel at +5s cap]"
         label = (f"{row['video']}  t={entry:.2f}s  {row['direction']}  "
                  f"traverse {float(row['traverse_s']):.1f}s  in tunnel "
-                 f"{out - entry:.1f}s  window {t1 - t0:.1f}s{flag}")
+                 f"{out - entry:.1f}s  window {t1 - t0:.1f}s{call_text}{flag}")
         cards.append((row["direction"], f"{row['video']}|{entry:.2f}",
                       "data:image/jpeg;base64," + base64.b64encode(buf).decode(), label))
 
     path = write_html(cards, Path(args.out_dir))
+    if dropped_not_alone:
+        print(f"dropped {dropped_not_alone} traverses with a second animal in the tunnel")
     print(f"{len(cards)} cards -> {path}  (no video decoded)")
 
 

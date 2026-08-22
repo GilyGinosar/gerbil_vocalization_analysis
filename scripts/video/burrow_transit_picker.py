@@ -280,15 +280,18 @@ def fixed_window(start_s: float, end_s: float, context_s: float) -> tuple[float,
 
 def mark_crossing(tile: np.ndarray, t0: float, t1: float, start_s: float, end_s: float,
                   context_s: float, labels: tuple[str, str] = ("crossing starts", "ends"),
-                  reverse: bool = False) -> None:
-    """Shade the crossing inside a fixed window and put a lag scale under it."""
+                  reverse: bool = False, fill: bool = False) -> None:
+    """Label the two landmark lines. ``fill`` also tints the span between them --
+    off by default: the two green lines already mark entry and exit, and a block
+    on top of them is a second highlight competing with the same information."""
     width = tile.shape[1]
     x_start = max(0, min(width, t_to_x(start_s, t0, t1, width, reverse)))
     x_end = max(0, min(width, t_to_x(end_s, t0, t1, width, reverse)))
     xa, xb = min(x_start, x_end), max(x_start, x_end)
     xb = max(xb, xa + 1)
-    lifted = tile[:, xa:xb].astype(np.int16) + np.array([30, 10, 0], np.int16)
-    tile[:, xa:xb] = np.clip(lifted, 0, 255).astype(np.uint8)
+    if fill:
+        lifted = tile[:, xa:xb].astype(np.int16) + np.array([0, 42, 0], np.int16)
+        tile[:, xa:xb] = np.clip(lifted, 0, 255).astype(np.uint8)
     # keep each label beside its own line, whichever side of the card it is on
     cv2.putText(tile, labels[0], (x_start + (4 if not reverse else -76), SPEC_H - 6),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.38, (150, 255, 150), 1)
