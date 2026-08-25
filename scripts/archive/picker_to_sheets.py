@@ -48,7 +48,10 @@ def read_cards(picker_html: Path) -> list[dict]:
         if image is None:
             continue
         direction = next((d for d in DIRECTIONS if f" {d} " in f" {label} "), "other")
+        # two label styles: per-type counts from the picker, or a single
+        # "calls: N tunnel-localised" from the cross-experiment sampler
         calls = sum(int(n) for n in re.findall(r"(\d+) (?:high-freq|warble|alarm|stacks|newborn)", label))
+        calls += sum(int(n) for n in re.findall(r"calls: (\d+) tunnel-localised", label))
         cards.append({"image": image, "label": label, "direction": direction,
                       "calls": calls, "event_id": event_id})
     return cards
