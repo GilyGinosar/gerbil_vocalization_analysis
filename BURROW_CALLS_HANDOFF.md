@@ -224,9 +224,32 @@ one traverse with literally 0.0000 before entry), and motion rose after arrival 
 7 of 8 traverses — the traveller entering view, which is why only the PRE-entry
 window is used for the split.
 
-**Status: the 400-traverse pilot was still running when this session ended.** It
-writes `exports/burrow/nest_motion/nest_motion.csv` and prints a median split with
-a permutation test. Re-run or resume with:
+**RESULT (400 traverses, 2026-08-26).** Pre-entry nest motion is heavily skewed
+towards stillness — median 0.0032 of pixels changing per frame, p25 0.0001, so the
+lower quartile is a nest where essentially nothing moves. Split at the median:
+
+| pre-entry nest | n | calls/s BEFORE entry | calls/s AT ARRIVAL | arrival / before |
+|---|---|---|---|---|
+| QUIET | 200 | 0.382 | 1.260 (59% had any call) | 3.30 |
+| ACTIVE | 200 | 0.697 | 1.740 (78% had any call) | 2.50 |
+
+active − quiet: **+0.480 calls/s at arrival (p=0.003)**, but **+0.315 calls/s
+before entry too (p<1e-4)** — so a moving nest is a noisier nest generally, and the
+arrival difference is riding on that. Normalising by each group's own pre-entry
+baseline REVERSES the ranking: the arrival burst is **3.30x baseline when the nest
+was still, 2.50x when it was already active**. Read that carefully before building
+on it — the multiplicative-vs-additive trap that already caught the light/dark
+analysis in this file.
+
+Two things it does establish. **The burst happens from a still nest** — 1.260
+calls/s and 59% of traverses with a call when nothing was moving beforehand — which
+matches the audio-based silent-nest result (1.503 vs 2.230) and argues the arriving
+animal contributes on its own. And this is the **first evidence on the residents
+question that is not circular**: nest motion is measured from video, the burst from
+audio, so unlike the prior-nest-CALL split it does not use calling to predict
+calling. Whether an active nest adds anything arrival-specific is NOT settled —
+the proportional analysis says no, the additive says yes, and 400 traverses is a
+pilot. Re-run or extend with:
 
     python scripts/analysis/nest_motion.py --scan /mnt/ceph/users/gginosar/burrow_scan_2026_02 \
         --out-dir exports/burrow/nest_motion --limit 400
