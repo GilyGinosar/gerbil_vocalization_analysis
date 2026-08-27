@@ -64,7 +64,34 @@ MAX_LINGER_S = 5.0      # how long to wait for the tunnel to empty after the far
 EMPTY_FRAMES = 5        # frames of empty tunnel that count as "the animal is out"
 TILE_FPS = 2            # cached strip frame rate
 TILE_W = 300
-BEFORE_S, AFTER_S = 2.0, 1.0
+BEFORE_S, AFTER_S = 3.0, 1.0
+
+
+EXPECTED_FRAMES = 10800     # 360 s at 30 fps
+FRAME_TOLERANCE = 0.05      # accept +/-5%; beyond that the file is not a normal 6 min clip
+
+
+def video_is_sane(video: Path) -> tuple[bool, str]:
+    """Reject files whose frame count is not a plausible 6-minute clip.
+
+    Measured across date folders, video duration wanders while audio stays fixed
+    -- the cameras drop frames. Usually by milliseconds, but experiment 334 has a
+    file whose reported frame count implies a 15,838-second clip. Nothing
+    downstream would notice: the scan would happily emit landmarks with times
+    derived from frame/30 on a file where that is meaningless. So refuse it here
+    and say why, rather than produce confident nonsense.
+    """
+    cap = cv2.VideoCapture(str(video))
+    frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    cap.release()
+    if not frames or frames <= 0 or not fps or fps <= 0:
+        return False, f"unreadable frame count / fps ({frames} / {fps})"
+    low = EXPECTED_FRAMES * (1 - FRAME_TOLERANCE)
+    high = EXPECTED_FRAMES * (1 + FRAME_TOLERANCE)
+    if not low <= frames <= high:
+        return False, f"{frames:.0f} frames at {fps:.2f} fps = {frames/fps:.1f} s, not a ~360 s clip"
+    return True, ""
 
 
 def decode_all(video: Path, roi) -> list[np.ndarray]:
@@ -212,6 +239,10 @@ def strip_for(n_frames: int, t_entry: float, t_exit: float,
 
 def scan_video(video: Path, roi, left: float, right: float, out_dir: Path,
                want_tiles: bool) -> list[dict]:
+    ok, why = video_is_sane(video)
+    if not ok:
+        print(f"{video.name}: SKIPPED -- {why}", flush=True)
+        return []
     frames = decode_all(video, roi)
     if not frames:
         print(f"{video.name}: decoded nothing", flush=True)
