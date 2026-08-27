@@ -14,6 +14,13 @@ things you need in order to read any figure built on that label:
           -- at the default cut, most "tunnel-origin" calls had nobody in the
           tunnel. This is a base-rate effect, not a bug in the measurement.
   right   the trade. Raising the quantile buys precision and spends sensitivity.
+  far right  what the threshold is REALLY selecting. For calls made while one
+          animal was in the tunnel, the level difference tracks where that animal
+          was standing: about -8 dB at the nest end, near 0 at the arena end. The
+          nest-end half of the tunnel scores like the nest-origin reference, so a
+          call from an animal genuinely inside the tunnel is labelled nest-origin
+          if it was made in the half nearer the nest. "Tunnel-origin" is closer to
+          "arena-half of the tunnel" than to "from the tunnel".
 
 The cut is computed PER EXPERIMENT (mic gain and tube acoustics differ), so the
 left panel marks the median cut across experiments while the middle and right
@@ -38,9 +45,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from scripts.video.burrow_transit_picker import file_index  # noqa: E402
+
 # the two states the threshold has to tell apart. Same hues the rest of the burrow
 # figures use; validated ΔE 25.2 protan / 29.3 tritan / 31.3 normal vision.
 STATE = {"tunnel empty": "#d1642a", "animal in tunnel": "#2f6fd0"}
+FPS = 30
 INK, MUTED = "#222222", "#888888"
 QUANTILES = (0.95, 0.98, 0.99, 0.995)
 MIN_REFERENCE = 50
@@ -76,6 +86,9 @@ def main() -> None:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--scan", required=True)
     parser.add_argument("--out-dir", required=True)
+    parser.add_argument("--position-experiments", type=int, default=20,
+                        help="how many experiments to walk for the position panel; it "
+                             "has to open every track parquet, so the default is a sample")
     args = parser.parse_args()
 
     scan, out_dir = Path(args.scan), Path(args.out_dir)
@@ -90,8 +103,37 @@ def main() -> None:
                                       if (g.state == "tunnel empty").sum() >= MIN_REFERENCE]))
                   for q in QUANTILES}
 
-    fig, axes = plt.subplots(1, 3, figsize=(16.5, 5.0),
-                             gridspec_kw={"wspace": 0.30, "width_ratios": [1.25, 1, 1]})
+    # where was the animal when each in-tunnel call was made? the tracks know, and
+    # this is the variable the dB threshold turns out to be selecting on
+    pos_rows = []
+    for exp_dir in sorted(p for p in scan.iterdir()
+                          if p.is_dir() and p.name.isdigit())[:args.position_experiments]:
+        origin = scan / "origin" / exp_dir.name / "call_origin.csv"
+        if not origin.exists():
+            continue
+        try:
+            occ = pd.read_csv(origin)
+        except pd.errors.EmptyDataError:
+            continue
+        occ = occ[occ.state == "animal in tunnel"]
+        if occ.empty:
+            continue
+        by_file = {f: g for f, g in occ.groupby("file")}
+        for track_path in (exp_dir / "tracks").glob("*.parquet"):
+            g = by_file.get(file_index(track_path.stem + ".mp4"))
+            if g is None:
+                continue
+            tr = pd.read_parquet(track_path)
+            xs, na = tr.x.to_numpy(), tr.n_animals.to_numpy()
+            for start, db in zip(g.start_s, g.tunnel_db_over_nest):
+                i = int(start * FPS)
+                if 0 <= i < len(xs) and na[i] == 1 and np.isfinite(xs[i]):
+                    pos_rows.append((xs[i], db))
+    pos = pd.DataFrame(pos_rows, columns=["x", "db"])
+
+    fig, axes = plt.subplots(1, 4, figsize=(22, 5.0),
+                             gridspec_kw={"wspace": 0.30,
+                                          "width_ratios": [1.25, 1, 1, 1.1]})
 
     # ---- left: the overlap the threshold has to live with --------------------
     ax = axes[0]
@@ -159,6 +201,32 @@ def main() -> None:
     ax.set_title("raising the cut buys precision, spends sensitivity",
                  loc="left", fontsize=11)
     ax.legend(frameon=False, fontsize=8.5, loc="lower left")
+
+    # ---- far right: the threshold is really a position cut ------------------
+    ax = axes[3]
+    edges_x = np.linspace(0, 1, 11)
+    centres_x = (edges_x[:-1] + edges_x[1:]) / 2
+    pos["bin"] = pd.cut(pos.x, edges_x)
+    grouped = pos.groupby("bin", observed=True).db
+    med = grouped.median().to_numpy()
+    q25, q75 = grouped.quantile(0.25).to_numpy(), grouped.quantile(0.75).to_numpy()
+    ax.fill_between(centres_x[:len(med)], q25, q75, color=STATE["animal in tunnel"],
+                    alpha=0.20, lw=0)
+    ax.plot(centres_x[:len(med)], med, color=STATE["animal in tunnel"], lw=2.2,
+            label="median call, one animal in the tunnel")
+    for q, style in ((0.95, "--"), (0.99, "-")):
+        ax.axhline(median_cut[q], color=INK, lw=1.5, ls=style)
+        ax.annotate(f"q={q} cut", (0.02, median_cut[q]), textcoords="offset points",
+                    xytext=(0, 5), fontsize=8.5, color=INK)
+    ax.axhline(float(empty.median()), color=STATE["tunnel empty"], lw=1.6, ls=":")
+    ax.annotate("median of the nest-origin reference", (0.35, float(empty.median())),
+                textcoords="offset points", xytext=(0, -14), fontsize=8.5,
+                color=STATE["tunnel empty"])
+    ax.set_xlabel("where the animal actually was\n(0 = nest end of the tunnel, "
+                  "1 = arena end)")
+    ax.set_ylabel("tunnel_db_over_nest, dB")
+    ax.set_title(f"the cut is a POSITION cut  (n={len(pos):,})", loc="left", fontsize=11)
+    ax.legend(frameon=False, fontsize=8.5, loc="lower right")
 
     for ax in axes:
         ax.grid(axis="y", color="0.93", lw=0.8)

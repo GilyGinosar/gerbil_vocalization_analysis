@@ -73,11 +73,28 @@ def _load() -> dict[str, dict]:
                 f"its own `experiments` range."
             )
 
-        folders[date_folder] = {"ids": ids, "skip": skip, "note": entry.get("note", "")}
+        folders[date_folder] = {"ids": ids, "skip": skip, "note": entry.get("note", ""),
+                                "n_animals": entry.get("n_animals")}
 
     if not folders:
         raise ValueError(f"No [date_folders.*] entries found in {CONFIG_PATH}.")
     return folders
+
+
+def get_colony_size(date_folder: str) -> int | None:
+    """Total gerbils in the setup for a date folder, or None if not recorded.
+
+    None means "not known", never zero. It is the denominator of a census: the
+    nest cannot be counted from video because the animals burrow under bedding,
+    so occupancy there is inferred as this minus the animals detected in the
+    arenas and the tunnel. Without it that inference cannot be made at all.
+    """
+    folders = _load()
+    if date_folder not in folders:
+        raise ValueError(
+            f"Unknown date folder {date_folder!r}. Configured: {', '.join(sorted(folders))}."
+        )
+    return folders[date_folder]["n_animals"]
 
 
 def list_date_folders() -> list[str]:

@@ -9,7 +9,19 @@
 #   [date_folders.2026_08]
 #   experiments = "741-799"          # ranges and single ids, comma-separated
 #   skip        = [783, 784]         # optional: ids to leave unprocessed
+#
+# `skip` covers both "recording never started" and "recorded but unusable" —
+# every consumer treats them the same, so keep the reason as a comment beside
+# the ids.
 #   note        = "free text"        # optional
+#   n_animals   = 6                  # optional: colony size, adults + pups
+#
+# `n_animals` is the total number of gerbils in the setup for that date folder.
+# It is what makes a census possible: animals in the nest cannot be counted from
+# video (they burrow under the bedding), but nest occupancy can be inferred as
+# n_animals minus those detected in arena_1, arena_2 and the tunnel. Leave it out
+# when the count is not known -- consumers must treat "missing" as "cannot infer",
+# never as zero.
 #
 # `experiments` accepts "97-116", "741-760, 785, 790", or a single "785".
 # Ranges are inclusive at both ends. Ids may not appear in two date folders,
@@ -24,14 +36,30 @@ experiments = "235-237"
 skip = [236]
 
 [date_folders.2025_07]
+n_animals = 6
 experiments = "272-278"
 
 [date_folders.2025_10]
+n_animals = 6
 experiments = "332-344"
 
 [date_folders.2026_02]
+n_animals = 6
 experiments = "492-567"
-skip = [502, 507, 524, 528, 536, 537, 538, 539, 551]
+skip = [
+  # recording never started
+  502, 507, 524, 528, 536, 537, 538, 539, 551,
+  # recorded, but too little to use: 2 chunks, ~9 minutes
+  523,
+  # TEMPORARY, 2026-08-22 -- 533 is NOT unusable and must come back. It carries a
+  # neural recording. Its calls.csv is intact (9,458 rows), but its raw
+  # concatenated_data_cam_mic_sync/ was moved into experiment_533/backup/ on
+  # 2026-07-29, so pool_calls cannot find sync.csv and cannot put its calls on the
+  # experiment clock. Skipping it deliberately beats failing silently. Remove this
+  # line once the folder is back (or once we teach experiment_sync_path to look in
+  # backup/) and re-run pool_calls.
+  533,
+]
 
 [date_folders.2026_08]
 experiments = "741-815" 

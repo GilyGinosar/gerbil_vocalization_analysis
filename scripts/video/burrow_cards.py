@@ -100,9 +100,82 @@ def ribbon(calls: list, t0: float, t1: float, width: int, reverse: bool,
     return bar
 
 
-def build_card(scan: Path, row, direction: str, channel: int,
-               das_cache: dict, drift_cache: dict) -> np.ndarray | None:
-    """Spectrogram + DAS ribbons + frame strip + time axis, as one image."""
+CHANNEL_NAME = {1: "ch01  TUNNEL mic", 0: "ch00  NEST mic (deeper in)"}
+NEST_PANEL_MAX_W = 1400   # only a sanity cap; the nest frame keeps its own aspect
+
+
+def nest_frame(datadir: Path, file_num: int, t_entry: float,
+               height: int) -> np.ndarray | None:
+    """One frame of the nest_top camera at the moment the animal enters the tunnel.
+
+    The burrow_side camera cannot see who is already in the nest -- that is the
+    whole reason the localiser exists -- so this puts the nest itself on the card.
+    Same sync folder and the same time base as t_entry; the cameras are recorded
+    together, but they are separate devices and nobody has verified frame-level
+    alignment between them, so read it as "about then", not exactly then.
+    """
+    path = datadir / f"video_nest_top_{file_num:03d}.mp4"
+    if not path.exists():
+        return None
+    cap = cv2.VideoCapture(str(path))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    cap.set(cv2.CAP_PROP_POS_FRAMES, max(int(t_entry * fps), 0))
+    ok, frame = cap.read()
+    cap.release()
+    if not ok or frame is None:
+        return None
+    frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+    # keep the camera's own aspect: it is a wide view of the whole nest, and
+    # cropping it to a card-sized square threw away most of the floor
+    scale = min(height / frame.shape[0], NEST_PANEL_MAX_W / frame.shape[1])
+    frame = cv2.resize(frame, (max(int(frame.shape[1] * scale), 1),
+                               max(int(frame.shape[0] * scale), 1)))
+    if frame.shape[0] < height:                       # letterbox to the card height
+        pad = np.zeros((height - frame.shape[0], frame.shape[1], 3), np.uint8)
+        frame = cv2.vconcat([frame, pad])
+    cv2.putText(frame, f"nest_top @ ENTRY  t={t_entry:.2f}s", (6, 18),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (120, 235, 255), 1, cv2.LINE_AA)
+    return frame
+
+
+ORIGIN_COLOUR = {"tunnel": (60, 190, 255), "nest": (235, 150, 70)}   # BGR
+
+
+def localiser_ribbon(tunnel_starts, nest_starts, t0: float, t1: float,
+                     width: int, reverse: bool) -> np.ndarray:
+    """One row marking the localiser's verdict on every call in view.
+
+    Amber = scored tunnel-origin (ch01 louder than that experiment's tunnel-empty
+    reference), blue = nest-origin. Only the onset is known here, so each call is
+    a fixed-width tick rather than a bar. Read it against the two spectrograms
+    above: the verdict is a threshold on their level difference, and at the
+    default cut fewer than half the amber ticks had an animal in the tunnel.
+    """
+    bar = np.full((RIBBON_H, width, 3), 24, np.uint8)
+    counts = {"tunnel": 0, "nest": 0}
+    for kind, starts in (("nest", nest_starts), ("tunnel", tunnel_starts)):
+        for start in starts:
+            if start < t0 or start > t1:
+                continue
+            counts[kind] += 1
+            x = t_to_x(start, t0, t1, width, reverse)
+            cv2.rectangle(bar, (max(0, x - 2), 2), (min(width, x + 2), RIBBON_H - 3),
+                          ORIGIN_COLOUR[kind], -1)
+    cv2.putText(bar, f"localiser  tunnel({counts['tunnel']})  nest({counts['nest']})",
+                (4, RIBBON_H - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (170, 170, 170), 1)
+    return bar
+
+
+def build_card(scan: Path, row, direction: str, channels: tuple[int, ...],
+               das_cache: dict, drift_cache: dict,
+               with_nest_frame: bool = False,
+               origin: tuple[dict, dict] | None = None) -> np.ndarray | None:
+    """Spectrograms (one per channel) + DAS ribbons + frame strip + time axis.
+
+    With both ch01 and ch00 the localiser's own evidence is on the card: a call
+    louder on the top strip than the bottom one is what it scores as
+    tunnel-origin, and you can see whether that matches what you hear.
+    """
     strip = cv2.imread(str(scan / str(row.exp) / row.tile))
     if strip is None:
         return None
@@ -111,7 +184,7 @@ def build_card(scan: Path, row, direction: str, channel: int,
     if key not in drift_cache:
         # audio and video run on different clocks in these folders (~0.07%), so the
         # spectrogram must be stretched to the video's time base, not merely offset
-        wav = audio_path(datadir, channel, row.file_num)
+        wav = audio_path(datadir, channels[0], row.file_num)
         cap = cv2.VideoCapture(str(datadir / row.video))
         with sf.SoundFile(str(wav)) as handle:
             audio_dur = handle.frames / handle.samplerate
@@ -130,13 +203,19 @@ def build_card(scan: Path, row, direction: str, channel: int,
     t0 = entry - BEFORE_S
     t1 = t0 + width / PX_PER_S
 
-    audio, fs = read_window(audio_path(datadir, channel, row.file_num),
-                            t0, t1, drift_cache[key], 0.0)
-    spec = spectrogram_tile(audio, fs, width, reverse)
-    annotate_spectrogram(spec, t0, t1, entry, out, reverse)
-    mark_crossing(spec, t0, t1, entry, out, BEFORE_S, ("enters", "out of tunnel"), reverse)
-    y = int(spec.shape[0] * (1 - (GUIDE_KHZ * 1000 - 500) / (45000 - 500)))
-    cv2.line(spec, (0, y), (width, y), (110, 110, 110), 1)
+    specs = []
+    for ch in channels:
+        audio, fs = read_window(audio_path(datadir, ch, row.file_num),
+                                t0, t1, drift_cache[key], 0.0)
+        spec = spectrogram_tile(audio, fs, width, reverse)
+        annotate_spectrogram(spec, t0, t1, entry, out, reverse)
+        mark_crossing(spec, t0, t1, entry, out, BEFORE_S,
+                      ("enters", "out of tunnel"), reverse)
+        y = int(spec.shape[0] * (1 - (GUIDE_KHZ * 1000 - 500) / (45000 - 500)))
+        cv2.line(spec, (0, y), (width, y), (110, 110, 110), 1)
+        cv2.putText(spec, CHANNEL_NAME.get(ch, f"ch{ch:02d}"), (6, 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (120, 235, 255), 1, cv2.LINE_AA)
+        specs.append(spec)
     axis = time_axis(width, t0, t1, entry, reverse)
     if row.exp not in das_cache:
         das_cache[row.exp] = all_calls(int(row.exp))
@@ -144,7 +223,21 @@ def build_card(scan: Path, row, direction: str, channel: int,
     arena = das_cache[row.exp]["arena_1"].get(row.file_num, [])
     bars = [ribbon(under, t0, t1, width, reverse, "DAS underground"),
             ribbon(arena, t0, t1, width, reverse, "DAS arena_1")]
-    return cv2.vconcat([spec, *bars, strip, axis])
+    if origin is not None:
+        tunnel_starts, nest_starts = origin
+        key = (int(row.exp), int(row.file_num))
+        bars.insert(0, localiser_ribbon(tunnel_starts.get(key, ()),
+                                        nest_starts.get(key, ()),
+                                        t0, t1, width, reverse))
+    card = cv2.vconcat([*specs, *bars, strip, axis])
+    if with_nest_frame:
+        # a fixed-width panel on the left of every card, so the anchor column that
+        # build_sheets aligns on is shifted by the same amount everywhere
+        face = nest_frame(datadir, int(row.file_num), entry, card.shape[0])
+        if face is None:
+            face = np.zeros((card.shape[0], 320, 3), np.uint8)
+        card = cv2.hconcat([face, card])
+    return card
 
 
 # ---- stacking cards into sheets -------------------------------------------
@@ -310,8 +403,21 @@ def main() -> None:
     parser.add_argument("--per-cell", type=int, default=15,
                         help="traverses per direction x (calls / quiet) cell, or in total "
                              "when --position-band selects them")
-    parser.add_argument("--channel", type=int, default=1,
-                        help="raw mic channel for the spectrogram, 0-based (1 = the tunnel mic)")
+    parser.add_argument("--channels", default="1",
+                        help="raw mic channels to draw, 0-based, comma separated. '1,0' "
+                             "puts the tunnel mic above the nest mic so the localiser's "
+                             "evidence is visible on the card.")
+    parser.add_argument("--localiser-marks", action="store_true",
+                        help="add a ribbon marking each call tunnel-origin or nest-origin")
+    parser.add_argument("--nest-frame", action="store_true",
+                        help="weld a nest_top frame from the moment of entry onto each "
+                             "card, so you can see who was already in the nest")
+    parser.add_argument("--prior-nest", choices=("any", "yes", "no"), default="any",
+                        help="'no' keeps only traverses where the NEST was silent in the "
+                             "seconds before entry -- the condition that separates the "
+                             "arrival burst from an ongoing colony bout")
+    parser.add_argument("--prior-window", type=float, default=5.0)
+    parser.add_argument("--localiser-quantile", type=float, default=0.99)
     parser.add_argument("--direction", help="keep only this direction")
     parser.add_argument("--position-band", help="lo,hi -- select traverses whose calls fall in "
                                                 "this stretch of tunnel, e.g. 0.05,0.15")
@@ -335,10 +441,36 @@ def main() -> None:
     args = parser.parse_args()
 
     scan, out_dir = Path(args.scan), Path(args.out_dir)
+    channels = tuple(int(c) for c in args.channels.split(","))
     traverses = pd.read_parquet(scan / f"traverses_{args.date}.parquet")
     traverses = traverses[traverses.single_animal & traverses.tile.notna()]
     if args.direction:
         traverses = traverses[traverses.direction == args.direction]
+
+    origin = None
+    if args.prior_nest != "any" or args.localiser_marks:
+        # the same localiser split the figures use, so a card set matches a panel
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+        from scripts.analysis.raster_and_rate_tunnel import localised_sides
+        tunnel_calls, nest_calls, _ = localised_sides(
+            scan, quantile=args.localiser_quantile)
+        if args.localiser_marks:
+            origin = (tunnel_calls, nest_calls)
+
+    if args.prior_nest != "any":
+        want = args.prior_nest == "yes"
+        keep = []
+        for r in traverses.itertuples():
+            times = nest_calls.get((int(r.exp), int(r.file_num)))
+            had = bool(times is not None and times.size
+                       and ((times >= r.t_entry - args.prior_window)
+                            & (times < r.t_entry)).any())
+            keep.append(had == want)
+        before = len(traverses)
+        traverses = traverses[keep]
+        print(f"prior-nest={args.prior_nest}: {len(traverses)} of {before} traverses "
+              f"(nest {'called' if want else 'silent'} in the "
+              f"{args.prior_window:g} s before entry)")
 
     localised = tunnel_localised(scan)
     traverses = traverses[[(e, f) in localised for e, f in zip(traverses.exp, traverses.file_num)]]
@@ -380,7 +512,8 @@ def main() -> None:
     drift_cache: dict[tuple[int, int], float] = {}
     cards = []
     for direction, n_calls, row in picked:
-        image = build_card(scan, row, direction, args.channel, das_cache, drift_cache)
+        image = build_card(scan, row, direction, channels, das_cache,
+                           drift_cache, args.nest_frame, origin)
         if image is None:
             continue
         entry = float(row.t_entry)
