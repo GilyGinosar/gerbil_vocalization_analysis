@@ -51,13 +51,24 @@ NO_ARENA_VIDEO = {506, 514, 515}
 CATEGORY_TABLE = REPO_ROOT / "data" / "nest_scoring" / "nest_category_full.csv"
 
 
-def selection_from_category(category: str, n: int, out: Path,
-                            with_calls: bool) -> Path:
+def selection_from_category(category: str, n: int, out: Path, with_calls: bool,
+                            max_in_tunnel: float | None = None,
+                            scan: str = "", date: str = "2026_02") -> Path:
     """Pick n traverses of one nest category, one per experiment."""
     cat = pd.read_csv(CATEGORY_TABLE)
     sub = cat[(cat.cat == category) & (~cat.exp.isin(NO_ARENA_VIDEO))]
     if with_calls:
         sub = sub[sub.arrival_calls > 0]
+    if max_in_tunnel:
+        from scripts.utils.data_rules import load_traverses
+        tv = load_traverses(scan, date, single_animal=True, quiet=True)
+        dur = {(int(r.exp), int(r.file_num), round(float(r.t_entry), 3)):
+               r.t_out - r.t_entry for r in tv.itertuples()}
+        keep = [dur.get((int(r.exp), int(r.file_num), round(float(r.t_entry), 3)),
+                        1e9) <= max_in_tunnel for r in sub.itertuples()]
+        before = len(sub)
+        sub = sub[keep]
+        print(f"  kept {len(sub)} of {before} at <= {max_in_tunnel:g}s in tunnel")
     if sub.empty:
         raise SystemExit(f"no {category} traverses left after filtering")
     order = sub.sample(frac=1.0, random_state=0).groupby("exp").cumcount()
@@ -86,6 +97,11 @@ def main() -> None:
                          "arrival. Selects FOR the phenomenon, so say so when showing "
                          "the result -- the category rate is the unbiased number.")
     ap.add_argument("--per-sheet", type=int, default=6)
+    ap.add_argument("--max-in-tunnel", type=float,
+                    help="drop traverses longer than this many seconds. Card width "
+                         "is 600 px per second, so one 38 s traverse is a 25,000 px "
+                         "sheet on which every other card is padding. Filtering to a "
+                         "similar length lets --per-sheet actually fill a page.")
     ap.add_argument("--max-width", type=int, default=12000)
     ap.add_argument("--no-localiser-marks", action="store_true",
                     help="drop the tunnel/nest verdict ribbon. It is a POSITION "
@@ -99,7 +115,8 @@ def main() -> None:
     elif args.category:
         select = selection_from_category(args.category, args.n,
                                          out_dir / "selection_in.csv",
-                                         args.with_calls)
+                                         args.with_calls, args.max_in_tunnel,
+                                         args.scan, args.date)
     else:
         raise SystemExit("give either --select-csv or --category")
 

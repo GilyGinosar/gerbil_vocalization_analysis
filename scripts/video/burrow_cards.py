@@ -107,6 +107,24 @@ CHANNEL_LABEL_SCALE = 0.85      # the three traces are the point of the card; na
                                 # them big enough to read on a slide
 AVERAGED = (10, 20, 30)         # DAS ran on these, not on any single raw mic
 NEST_PANEL_MAX_W = 1400   # only a sanity cap; the nest frame keeps its own aspect
+# End panels are a FIXED width so t=0 lands at the same column on every card and
+# the entry lines line up down a sheet. They used to keep their natural width,
+# which was constant while every card had a panel -- and silently shifted a card
+# by ~350 px the moment one was missing and the 320 px black fallback stood in.
+ARENA_PANEL_W = 666
+NEST_PANEL_W = 375
+
+
+def fit_panel(frame, height: int, width: int):
+    """Letterbox a frame into exactly (height, width), keeping its aspect."""
+    if frame is None:
+        return np.zeros((height, width, 3), np.uint8)
+    scale = min(height / frame.shape[0], width / frame.shape[1])
+    frame = cv2.resize(frame, (max(int(frame.shape[1] * scale), 1),
+                               max(int(frame.shape[0] * scale), 1)))
+    out = np.zeros((height, width, 3), np.uint8)
+    out[:frame.shape[0], :frame.shape[1]] = frame
+    return out
 
 
 def nest_frame(datadir: Path, file_num: int, t_entry: float,
@@ -289,9 +307,9 @@ def build_card(scan: Path, row, direction: str, channels: tuple[int, ...],
         # it beside the nest keeps the two views of the same place adjacent, and on
         # to_nest it also leaves t=0 at x=0 on every card, which the left-hand
         # placement did not -- the panel's width varies with the camera's aspect.
-        face = nest_frame(datadir, int(row.file_num), entry, card.shape[0], mirror)
-        if face is None:
-            face = np.zeros((card.shape[0], 320, 3), np.uint8)
+        face = fit_panel(nest_frame(datadir, int(row.file_num), entry,
+                                    card.shape[0], mirror),
+                         card.shape[0], NEST_PANEL_W)
         card = cv2.hconcat([card, face] if mirror else [face, card])
     if with_arena_frame:
         # the panel sits at the end of the card the arena is at, which flips with
@@ -299,9 +317,9 @@ def build_card(scan: Path, row, direction: str, channels: tuple[int, ...],
         # the arena is on the LEFT; a to_arena card is not, so the arena is the
         # destination on the RIGHT. Either way each end panel shows the place that
         # end of the tunnel opens onto.
-        out_face = arena_frame(datadir, int(row.file_num), entry, card.shape[0])
-        if out_face is None:
-            out_face = np.zeros((card.shape[0], 320, 3), np.uint8)
+        out_face = fit_panel(arena_frame(datadir, int(row.file_num), entry,
+                                         card.shape[0]),
+                             card.shape[0], ARENA_PANEL_W)
         card = cv2.hconcat([out_face, card] if mirror else [card, out_face])
     return card
 

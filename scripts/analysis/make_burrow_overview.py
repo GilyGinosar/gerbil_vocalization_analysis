@@ -106,7 +106,11 @@ def main() -> None:
     if rc == 0:
         # name it for what it IS, not for the directory it happened to land in:
         # exports/ held a dozen */burrow_overview.png that only timestamps told apart
-        tag = "burrow_overview_lightdark" if args.split_light else "burrow_overview"
+        sets = {c.split(":")[0] for c in args.column.split(",")}
+        which = sets.pop() if len(sets) == 1 else "both"
+        tag = f"burrow_overview_{which}"
+        if args.split_light:
+            tag += "_lightdark"
         publish(out_dir / "burrow_overview.png",
                 name=f"{tag}_{args.date}_{today()}.png", date=args.date)
     raise SystemExit(rc)

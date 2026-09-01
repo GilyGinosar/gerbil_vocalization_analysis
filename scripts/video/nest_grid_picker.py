@@ -44,7 +44,8 @@ THUMB_H = 300           # px; the grid scales them down, this is the stored size
 JPEG_Q = 78
 
 
-def thumb(exp: int, file_num: int, t_entry: float, pre: float) -> np.ndarray | None:
+def thumb(exp: int, file_num: int, t_entry: float, pre: float,
+          thumb_h: int = THUMB_H) -> np.ndarray | None:
     """One frame from the middle of the pre-entry window.
 
     A single seek: the frame returned may land a few frames off the one asked for
@@ -62,8 +63,8 @@ def thumb(exp: int, file_num: int, t_entry: float, pre: float) -> np.ndarray | N
     if not ok or frame is None:
         return None
     up = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-    scale = THUMB_H / up.shape[0]
-    return cv2.resize(up, (max(int(up.shape[1] * scale), 1), THUMB_H))
+    scale = thumb_h / up.shape[0]
+    return cv2.resize(up, (max(int(up.shape[1] * scale), 1), thumb_h))
 
 
 HEAD = """<!doctype html><meta charset=utf-8><title>nest scoring — is anybody home?</title>
@@ -101,7 +102,7 @@ HEAD = """<!doctype html><meta charset=utf-8><title>nest scoring — is anybody 
 
 TAIL = r"""</div>
 <script>
- const KEY='nest_grid_picks';
+ const KEY='__STORAGE_KEY__';
  const cells=()=>[...document.querySelectorAll('.cell')];
  tot.textContent=cells().length;
  // The page is the source of truth, not storage: opened as a file:// URL the
@@ -144,6 +145,14 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=0, help="0 = all rows")
     ap.add_argument("--pre", type=float, default=5.0)
     ap.add_argument("--cols", type=int, default=5)
+    ap.add_argument("--thumb-h", type=int, default=THUMB_H,
+                    help=f"stored px per thumbnail (default {THUMB_H}). Raise it with "
+                         f"fewer --cols when the set being checked is one where a "
+                         f"missed animal changes the answer.")
+    ap.add_argument("--storage-key", default="nest_grid_picks",
+                    help="localStorage key. Give each set its own, or a second "
+                         "picker served from the same localhost port inherits and "
+                         "re-exports the first one's marks.")
     ap.add_argument("--shard", type=int, default=0)
     ap.add_argument("--shards", type=int, default=1)
     ap.add_argument("--assemble", action="store_true")
@@ -165,7 +174,8 @@ def main() -> None:
             f = frag / f"{i:05d}.txt"
             if f.exists():
                 continue
-            img = thumb(int(r.exp), int(r.file_num), float(r.t_entry), args.pre)
+            img = thumb(int(r.exp), int(r.file_num), float(r.t_entry), args.pre,
+                        args.thumb_h)
             if img is None:
                 f.write_text("")
                 continue
@@ -189,7 +199,8 @@ def main() -> None:
         cards.append(f'<div class="cell" data-id="{ident}">'
                      f'<img src="data:image/jpeg;base64,{b64}">'
                      f'<div class="id">{i + 1}</div></div>')
-    html = HEAD.replace("__COLS__", str(args.cols)) + "".join(cards) + TAIL
+    html = (HEAD.replace("__COLS__", str(args.cols)) + "".join(cards)
+            + TAIL.replace("__STORAGE_KEY__", args.storage_key))
     path = out_dir / "nest_scoring.html"
     path.write_text(html)
     print(f"wrote {path}  ({len(cards)} of {len(rows)} traverses, "
