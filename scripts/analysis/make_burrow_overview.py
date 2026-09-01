@@ -47,6 +47,11 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.utils.publish import publish, today  # noqa: E402
+
 CATEGORY_TABLE = REPO_ROOT / "data" / "nest_scoring" / "nest_category_full.csv"
 
 
@@ -97,7 +102,14 @@ def main() -> None:
     if args.split_light:
         cmd.append("--split-light")
     print(" ".join(cmd), flush=True)
-    raise SystemExit(subprocess.call(cmd))
+    rc = subprocess.call(cmd)
+    if rc == 0:
+        # name it for what it IS, not for the directory it happened to land in:
+        # exports/ held a dozen */burrow_overview.png that only timestamps told apart
+        tag = "burrow_overview_lightdark" if args.split_light else "burrow_overview"
+        publish(out_dir / "burrow_overview.png",
+                name=f"{tag}_{args.date}_{today()}.png", date=args.date)
+    raise SystemExit(rc)
 
 
 if __name__ == "__main__":

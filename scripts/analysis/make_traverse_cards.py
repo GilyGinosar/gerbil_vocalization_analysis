@@ -44,6 +44,8 @@ if str(REPO_ROOT) not in sys.path:
 
 import pandas as pd  # noqa: E402
 
+from scripts.utils.publish import publish_many  # noqa: E402
+
 # arena_1 has no camera in these, so the end panel would be a black rectangle
 NO_ARENA_VIDEO = {506, 514, 515}
 CATEGORY_TABLE = REPO_ROOT / "data" / "nest_scoring" / "nest_category_full.csv"
@@ -114,7 +116,13 @@ def main() -> None:
     if not args.no_localiser_marks:
         cmd.append("--localiser-marks")
     print(" ".join(cmd), flush=True)
-    raise SystemExit(subprocess.call(cmd))
+    rc = subprocess.call(cmd)
+    if rc == 0:
+        label = args.category or Path(select).stem
+        sheets = sorted((out_dir / "sheets").glob("*.jpg"))
+        publish_many(sheets, prefix=f"cards_{label}_{args.direction}",
+                     date=args.date)
+    raise SystemExit(rc)
 
 
 if __name__ == "__main__":

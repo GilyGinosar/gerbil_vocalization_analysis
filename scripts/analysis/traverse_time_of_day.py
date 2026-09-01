@@ -49,6 +49,7 @@ from scripts.analysis.arena_occupancy_by_hour import (  # noqa: E402
 )
 from scripts.utils.data_rules import load_traverses  # noqa: E402
 from scripts.utils.ethogram_io import load_all_calls  # noqa: E402
+from scripts.utils.publish import publish  # noqa: E402
 
 AUDIO_BASE = Path("/mnt/home/neurostatslab/ceph/saneslab_data/gily_data/"
                   "Processed_data/Audio")
@@ -391,6 +392,7 @@ def main() -> None:
         "calls_arenas_hi95": bands["arenas"][2],
     }).to_csv(out_dir / "traverses_by_hour.csv", index=False)
     print(f"wrote {out}\nwrote {out_dir}/traverses_by_hour.csv")
+    publish(out, date=args.date)
     print(f"peak traverses {trate[peak]:.1f}/h at {peak:02d}:00 "
           f"[95% CI {tlo[peak]:.1f}-{thi[peak]:.1f}]")
     for lab in ("underground", "arenas"):

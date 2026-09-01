@@ -51,6 +51,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from scripts.utils.data_rules import load_traverses  # noqa: E402
+from scripts.utils.publish import publish  # noqa: E402
+
 VIDEO_BASE = Path("/mnt/home/neurostatslab/ceph/saneslab_data/gily_data/"
                   "Processed_data/Video")
 FPS, CHUNK_S = 30.0, 360.0
@@ -259,6 +262,7 @@ def main() -> None:
                   "to_arena_per_inside": per_in}).to_csv(
         out_dir / "occupancy_by_hour.csv", index=False)
     print(f"wrote {out}\nwrote {out_dir}/occupancy_by_hour.csv")
+    publish(out, date=args.date)
     print(f"tracking window {lo} .. {hi}")
     for lab, arr in (("animals outside", outside), ("raw traverses/h", r_nest + r_arena),
                      ("to_arena per inside", per_in), ("to_nest per outside", per_out)):
