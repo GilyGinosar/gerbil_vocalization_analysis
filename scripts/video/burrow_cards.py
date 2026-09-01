@@ -294,12 +294,15 @@ def build_card(scan: Path, row, direction: str, channels: tuple[int, ...],
             face = np.zeros((card.shape[0], 320, 3), np.uint8)
         card = cv2.hconcat([card, face] if mirror else [face, card])
     if with_arena_frame:
-        # always on the LEFT: the arena is where the animal came FROM, so it reads
-        # left-to-right as arena -> tunnel -> nest, matching the spectrogram order
+        # the panel sits at the end of the card the arena is at, which flips with
+        # direction: a to_nest card is mirrored so travel reads arena -> nest and
+        # the arena is on the LEFT; a to_arena card is not, so the arena is the
+        # destination on the RIGHT. Either way each end panel shows the place that
+        # end of the tunnel opens onto.
         out_face = arena_frame(datadir, int(row.file_num), entry, card.shape[0])
         if out_face is None:
             out_face = np.zeros((card.shape[0], 320, 3), np.uint8)
-        card = cv2.hconcat([out_face, card])
+        card = cv2.hconcat([out_face, card] if mirror else [card, out_face])
     return card
 
 
