@@ -223,3 +223,11 @@ exports/
 slurm/slurm-*.out
 slurm/slurm-*.err
 slurm/logs/
+
+# disBatch run artefacts: per-run status, wrappers and context dumps.
+# The .tasks files and the sbatch scripts ARE source; these are outputs.
+slurm/*_disBatch_*_status.txt
+slurm/*_disBatch_*_dbUtil.sh
+slurm/*_disBatch_*_context_wrap.out
+slurm/slurm-*.out
+slurm/slurm-*.err

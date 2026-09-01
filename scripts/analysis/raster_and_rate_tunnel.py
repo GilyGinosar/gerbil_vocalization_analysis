@@ -108,7 +108,8 @@ def light_dark(scan: Path, date: str) -> dict:
     sys.path.insert(0, str(REPO_ROOT / "scripts" / "utils"))
     from light_cycle import get_light_cycle_for_month
     on, off = get_light_cycle_for_month(date)
-    tv = pd.read_parquet(scan / f"traverses_{date}.parquet")
+    from scripts.utils.data_rules import load_traverses
+    tv = load_traverses(scan, date, keep_capped=True, quiet=True)
     hour = tv.start_time_real.dt.hour
     phase = np.where((hour >= on) & (hour < off), "light", "dark")
     print(f"  light cycle for {date}: {on:02d}:00-{off:02d}:00")

@@ -5,6 +5,14 @@ Extracted from ``run_ethogram.py`` so the committed analysis scripts
 don't depend on the larger exploratory ``run_ethogram`` module. Single source
 for the pooled-call loader, the experiment / recording-coverage helpers, and the
 circadian-day grids.
+
+Unusable data this module does NOT yet remove
+---------------------------------------------
+**The last file of every experiment is cut short and unusable** -- a rule about
+the recording rig, so it holds for every date folder. ``load_all_calls`` now
+drops it BY DEFAULT (``scripts.utils.data_rules.drop_last_file``); pass
+``keep_last_file=True`` to keep it. It costs 10,270 of 2026_02's 883,986 calls
+(1.2%). See README, "Data that is never usable", for the rest of the rules.
 """
 from __future__ import annotations
 
@@ -13,6 +21,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+from scripts.utils.data_rules import drop_last_file
 
 # --- Display / grouping constants (shared across the ethogram-family scripts) ---
 CALL_TYPE_ORDER = ["alarm", "high-freq", "warble", "stacks", "newborn"]
@@ -41,13 +51,22 @@ def all_calls_path(date_folder: str) -> tuple[Path, str]:
     return csv, "csv"
 
 
-def load_all_calls(date_folder: str) -> pd.DataFrame:
+def load_all_calls(date_folder: str, *, keep_last_file: bool = False) -> pd.DataFrame:
+    """Pooled calls for a date folder, with the truncated last chunk removed.
+
+    The drop is the DEFAULT, not an instruction in a docstring: this rule was
+    written down here and in the README and still got missed for two days, so it
+    now travels with the loader. Pass ``keep_last_file=True`` only to audit those
+    chunks deliberately.
+    """
     path, kind = all_calls_path(date_folder)
     if not path.exists():
         raise FileNotFoundError(f"No pooled calls file for {date_folder}: {path}")
     df = pd.read_parquet(path) if kind == "parquet" else pd.read_csv(path)
     df["start_time_real"] = pd.to_datetime(df["start_time_real"])
     print(f"{date_folder}: loaded {len(df):,} calls from {kind} ({path.name})")
+    if not keep_last_file:
+        df = drop_last_file(df)
     return df
 
 
