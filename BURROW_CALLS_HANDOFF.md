@@ -1,6 +1,8 @@
 # Do gerbils call when they cross the burrow tunnel? — handoff
 
-Written 2026-08-23. Everything below is measured on **2026_02** unless stated.
+Written 2026-08-23, substantially revised 2026-09-01. Everything below is measured on
+**2026_02** unless stated. **Read the next section first** — it supersedes parts of what
+follows, and says which parts.
 
 ## The question, and the short answer
 
@@ -16,6 +18,130 @@ of movement noise or of listening at one end.
 Every earlier attempt anchored on tunnel *entry* and looked weak or null. Anchoring on
 entry smears the arrival across the traverse-duration spread (median 1.0 s, tail to tens
 of seconds); anchoring on exit sharpens it.
+
+## Current state, 2026-09-01 — read this first
+
+### The result
+
+**The arrival burst needs residents PRESENT, but does not care whether they are awake.**
+
+```
+              n    any call    burst          95% CI
+  empty     293      39%       0.336     [+0.25, +0.43]
+  sleeping 1548      72%       1.460     [+1.37, +1.55]
+  active   1856      80%       1.393     [+1.30, +1.48]
+
+  empty vs sleeping   within-experiment   +1.106   p < 0.0001   (33 experiments)
+  sleeping vs active  within-experiment   -0.075   p = 0.66
+```
+
+`burst` = underground call rate in the arrival window (`t_out - 0.5` to `t_out + 2.0`)
+minus a baseline of equal length (`t_entry - 8` to `t_entry - 5.5`), while the animal is
+still in the arena. The subtraction is the whole point: an active nest calls more *all
+the time*, and the first version of this analysis reported that background as an arrival
+effect.
+
+`sleeping` and `active` differ **20x in motion** and give the same burst; `empty` and
+`sleeping` are **indistinguishable by motion** (0.0002 vs 0.0007, both at the sensor
+noise floor) and differ **fourfold**. So the variable is presence, not activity. No
+motion measure can see this distinction — only looking at the frames can, which is why
+the categories are hand-scored.
+
+The within-experiment permutation only ever compares empty against occupied *inside the
+same experiment*, so DAS threshold drift, colony composition, IR gain and date all
+cancel. The effect is marginally larger under it than without.
+
+**What to concede before being asked.** Calls still occur into an apparently empty nest —
+39% of them, burst +0.34 with a CI excluding zero — so the claim is *four times smaller*,
+not absent. "Empty" means **no animal visible**; one under bedding is invisible, which
+dilutes the contrast rather than manufacturing it. And `active` (n=1,856) is *assumed*
+occupied because something moved — nobody has verified it, and that is the mirror of the
+assumption that proved wrong for "still".
+
+### Why the labels can be trusted
+
+1,891 traverses scored by eye. **1,363 of them blind** — an undergrad scored the whole
+remaining set in a grid that deliberately hides the call count, so those labels cannot
+have been nudged by the outcome. Blind and non-blind give the same effect (+1.11 vs
++1.14).
+
+Then **all 312 traverses called empty were re-checked** in a 460 px grid: **2 needed
+correcting, 0.6%**. Early spot checks of single large frames had suggested ~17%, so the
+honest statement is that the empty set is verified end to end, not sampled.
+
+Every correction across the whole project — 9 of them — has run the **same direction**,
+occupied mislabelled as empty, and each has moved the effect **up**: +1.01 → +1.09 →
++1.11. Hand-scoring is biasing the result *against* itself.
+
+### The never-usable rules are now enforced in code
+
+`scripts/utils/data_rules.py` holds them and applies them **by default**:
+
+- **the truncated last chunk of each experiment** (~1.2% of calls, ~2.3% of traverses).
+  This was documented in README and in `ethogram_io`'s docstring and was still missed —
+  the nest-motion analysis ran for two days on those chunks. A rule in prose does not
+  propagate; a default argument does.
+- **a capped `t_out`** — `burrow_scan` returns `t_exit + MAX_LINGER_S` when the tunnel
+  never reads empty, an invented number up to 5 s late. Anything anchored on arrival must
+  drop it.
+
+`load_all_calls` and `data_rules.load_traverses` both apply them, with `keep_*` flags to
+opt out deliberately. `scripts/utils/check_direct_reads.py` finds code that reaches past
+the loaders to `pd.read_parquet` — in notebook cells as well as `.py` files. **25 such
+reads remain**, mostly older notebooks whose published numbers came from the old
+behaviour; they are flagged, not silently changed.
+
+### Where things are
+
+| what | where |
+|---|---|
+| the labels, corrections, both scorers | `data/nest_scoring/` — **tracked**, was in gitignored `exports/` |
+| the 3,786-traverse motion run | `data/nest_scoring/nest_motion_full.csv` |
+| the row set the undergrad saw | `data/nest_scoring/undergrad_rows.csv` — **needed**: her export lists only what she TICKED, so empties are knowable only by difference |
+| finished figures | `exports/<run date>/` and `Combined/<date folder>/`, both, nothing overwritten |
+
+Three one-command drivers, each encoding a flag combination where the defaults are wrong
+in ways that change what the figure says:
+
+    python scripts/analysis/make_burrow_overview.py --out-dir <dir>
+    python scripts/analysis/make_traverse_cards.py --category empty --out-dir <dir>
+    python scripts/analysis/traverse_time_of_day.py --scan <scan> --out-dir <dir>
+
+### Bugs found in figures that had already been shown
+
+Worth knowing because each one changed what a figure said, and each was invisible:
+
+- **`burrow_cards` drew every call backwards.** `to_nest` cards got left-to-right travel
+  by reversing the *time axis*, which mirrored the spectrogram with it — a rising USV
+  rendered as falling. Now the tiles' pixels are mirrored and time runs forward.
+- **The raster y-limit was a fixed ±20 rows.** 1% of a 3,786-row panel, but **44% of a
+  44-row panel**, where it read as traverses with no calls. Now proportional.
+- **Capped-`t_out` traverses were in every figure**, anchoring the arrival window up to
+  5 s off the event.
+- **Card end panels shifted the time axis.** Constant width whenever a panel existed, but
+  a 320 px black fallback when a frame could not be read — so most cards aligned and the
+  odd one silently did not. Now fixed-width; measured 1 px spread over 20 cards.
+- **`arena_occupancy_by_hour` was committed in a state where it could not run** — calling
+  `load_traverses` and `publish` without importing either.
+
+### Other results from this stretch
+
+**A new litter arrives 2026-03-02 and the traverse rate halves** — 29/h before, 13/h
+after. Dated independently by the logs ("mom making nest around newborns") and by newborn
+calls going 1.7% → 25.7% of all calls. It is a **step, not a slope**: within either period
+neither elapsed day nor call intensity predicts the rate. Any analysis pooling 2026_02
+averages two behaviourally different regimes.
+
+**The morning traverse peak is mostly occupancy.** Arena occupancy swings 9x across the
+day while traverses swing 4x. Normalise by the pool that could make each crossing and it
+inverts: emergence peaks in the morning, while the few animals out after dark return
+fastest. Tracking only reaches experiment 521 (Feb 28), so this is **entirely pre-litter**
+and cannot speak to what the litter changed.
+
+**For scheduling a logger:** peak 39.6/h at 07:00, +3 h after lights on, and the peak hour
+wins at every window length up to 7 h. But the day-to-day spread is 30–60% (the error
+bands bootstrap over *days*, not events), so a short fixed window is a gamble on any one
+day.
 
 ## The pipeline, in order
 
@@ -276,18 +402,40 @@ position does not resolve. Revisit only if you need the last 10% of the tube.
 
 ## Open questions, in the order I would take them
 
-1. **Who is calling** — the arriving animal or the nest residents greeting it. First-call
-   positions cluster at the same absolute position (~0.35) in both directions, which hints
-   at a place effect and would be consistent with residents. The localiser was built for
-   this and now has a well-posed question.
-2. **Run the full dwell control.** One command, already prepared.
-3. **The position curve is U-shaped for `to_nest`** — highest at the arena end (1.9),
-   dipping mid-tunnel (0.73), rising again near the nest. Earlier framings that described
-   a monotonic climb toward the nest were reading a truncated axis. Unexplained.
-4. **Inter-call intervals.** The nest-mouth examples are steady trains of near-identical
-   sweeps, not bursts. `vocalization_analysis/bouts.py` already exists.
-5. **Playbacks are still counted as calls** (see the repo's own gotchas) and have not been
-   excluded anywhere in this work.
+1. **Verify the `active` category.** 1,856 traverses assumed occupied because something
+   moved, never looked at. It is the same assumption that proved wrong for "still", and
+   a few hundred scored in the grid would settle it. `nest_grid_picker.py` builds the
+   page; give it its own `--storage-key`.
+
+2. **An inter-rater number.** The undergrad's set and Gily's do not overlap by design, so
+   there is no agreement figure. A few dozen deliberately shared rows would give one, and
+   it is the natural answer to "how reliable is eye-scoring".
+
+3. **Extend tracking past experiment 521.** The raw arena video exists for all 67
+   experiments; tracking stopped at 521 (Feb 28), one day before the litter. Running it
+   over 522–567 is the only way to test whether the litter kept animals indoors — the
+   obvious mechanism for the traverse rate halving, currently untestable.
+
+4. **The DAS cross-channel bug is still unfixed.** `exports/MESSAGE_TO_DAS_PIPELINE.md`
+   documents it, is hand-written, and is the only copy in a gitignored folder — move it
+   into `docs/` and commit it. It preferentially deletes the loudest copy of *underground*
+   calls (41 of 53 audited) in favour of leaked arena copies. That is the compartment this
+   whole analysis counts.
+
+5. **Cross-talk vs the no-leakage assumption.** That same message documents real
+   cross-talk in exp 492 (274 sub-15 ms cross-location pairs, ~22% of arena_2 coinciding
+   with arena_1), while the stored assumption says 2026_02 has none and `calls.csv` is
+   built without dedupe on that basis. Both cannot be true.
+
+6. **`single_animal` has false negatives.** Two of fifteen inspected cards showed a second
+   animal the tracker had not flagged (`multi_animal_frac = 0.000`). That column gates
+   every analysis here and has never been audited.
+
+7. **Who calls — the remaining routes.** The nest-occupancy split has gone as far as it
+   can. TDOA between ch01 (tunnel mouth) and ch00 (deep nest) measures arrival geometry
+   directly rather than inferring it from level, which is what made the dB threshold a
+   position gradient. Note the ~0.07% audio/video clock drift is irrelevant between two
+   audio channels but would swamp a millisecond-scale delay if video is used as an anchor.
 
 ## Practical notes
 
