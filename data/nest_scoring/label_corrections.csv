@@ -1,0 +1,8 @@
+exp,file_num,t_entry,action,note
+496,0,304.0280,discard,two animals in the traverse but single_animal=True
+492,15,28.3051,discard,two animals in the traverse but single_animal=True
+520,1,265.2792,occupied,animal visible in the nest; was scored empty
+505,169,140.3596,occupied,gerbil visible in the nest; was scored empty (card 8/15)
+513,182,341.2654,occupied,gerbil visible in the nest; was scored empty (card 9/15)
+517,106,171.3210,occupied,gerbil visible in the nest; was scored empty (card 12/15)
+514,17,139.7509,occupied,gerbil visible in the nest; missed on two earlier sheets
